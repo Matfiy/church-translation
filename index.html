@@ -79,7 +79,6 @@
         const eqAnimation = document.getElementById('eq-animation');
         const audioStatus = document.getElementById('audio-status');
 
-        // Automatically fill in current URL IP if hosted on the server
         if (window.location.hostname && window.location.hostname !== 'localhost') {
             serverIpInput.value = window.location.hostname;
         }
@@ -91,9 +90,8 @@
             connectBtn.disabled = true;
             connectBtn.innerText = "Connecting...";
 
-            // Connect to the secure or standard websocket endpoint on port 8000
             ws = new WebSocket(`ws://${ip}:8000/stream/uk`);
-            ws.binaryType = "blob"; // Audio data comes down as raw blobs
+            // Note: Removed binaryType = "blob" because we are parsing JSON strings now
 
             ws.onopen = () => {
                 statusBadge.className = "flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800";
@@ -101,16 +99,27 @@
                 setupPanel.classList.add('hidden');
                 livePanel.classList.remove('hidden');
 
-                // Audio elements require an initial user click permission to play audio on mobile devices
                 audioPlayer.play().catch(() => { });
             };
 
             ws.onmessage = async (event) => {
-                if (event.data instanceof Blob) {
-                    // Queue up incoming audio binary chunks
-                    const audioUrl = URL.createObjectURL(event.data);
-                    audioQueue.push(audioUrl);
-                    processAudioQueue();
+                try {
+                    // Parse the packet string back into a structural object
+                    const payload = JSON.parse(event.data);
+
+                    // 1. Add text translation to our on-screen logs
+                    appendTranscriptCard(payload.english, payload.ukrainian);
+
+                    // 2. Process base64 text data back into binary audio array
+                    if (payload.audio) {
+                        const audioBlob = base64ToBlob(payload.audio, "audio/wav");
+                        const audioUrl = URL.createObjectURL(audioBlob);
+
+                        audioQueue.push(audioUrl);
+                        processAudioQueue();
+                    }
+                } catch (err) {
+                    console.error("Payload execution error:", err);
                 }
             };
 
@@ -124,7 +133,6 @@
             };
         }
 
-        // Sequential audio player manager to prevent overlapping playback
         function processAudioQueue() {
             if (isPlaying || audioQueue.length === 0) return;
 
@@ -146,12 +154,48 @@
 
             audioPlayer.onended = () => {
                 isPlaying = false;
-                URL.revokeObjectURL(nextAudioUrl); // Clean browser memory cache
+                URL.revokeObjectURL(nextAudioUrl);
                 eqAnimation.classList.add('hidden');
                 eqAnimation.classList.remove('flex');
                 audioStatus.innerText = "Listening for pastor...";
-                processAudioQueue(); // Trigger next chunk if ready
+                processAudioQueue();
             };
+        }
+
+        // Dynamically designs and builds card modules in our scrolling feed log
+        function appendTranscriptCard(english, ukrainian) {
+            const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+            const card = document.createElement('div');
+            card.className = "bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-2 mt-4";
+
+            card.innerHTML = `
+                <div class="flex justify-between items-center text-[10px] font-mono text-slate-400">
+                    <span class="font-bold tracking-wider">AUDIO ENGINE ACTIVE</span>
+                    <span>${timestamp}</span>
+                </div>
+                <p class="text-sm text-slate-500 font-medium">${english}</p>
+                <p class="text-base text-slate-900 font-semibold border-t border-slate-100 pt-2">${ukrainian}</p>
+            `;
+
+            // Prepend lets new speaker translations appear cleanly right at the top
+            transcriptFeed.prepend(card);
+        }
+
+        // System tool to change base64 back into raw streaming binary audio data
+        function base64ToBlob(base64Data, contentType) {
+            const byteCharacters = atob(base64Data);
+            const byteArrays = [];
+
+            for (let offset = 0; offset < byteCharacters.length; offset += 512) {
+                const slice = byteCharacters.slice(offset, offset + 512);
+                const byteNumbers = new Array(slice.length);
+                for (let i = 0; i < slice.length; i++) {
+                    byteNumbers[i] = slice.charCodeAt(i);
+                }
+                const byteArray = new Uint8Array(byteNumbers);
+                byteArrays.push(byteArray);
+            }
+            return new Blob(byteArrays, { type: contentType });
         }
     </script>
 </body>

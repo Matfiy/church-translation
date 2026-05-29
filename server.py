@@ -1,68 +1,79 @@
 from fastapi.responses import HTMLResponse 
-import sounddevice as sd    # connects python to computer's audio hardware
-import numpy as np      # industry standard for heavy-duty mathematics
-from faster_whisper import WhisperModel # OpenAI's whisper model
-import requests     # simple HTTP library used to send web requests out to the internet
-from fastapi import FastAPI, WebSocket  # web framework for building API's in Python
-import uvicorn      # web server production engine that executes the FastAPI code
-import asyncio      # enables asynchronus programming (multiple tasks at the same time)
-from TTS.api import TTS     # Coqui's advanced Text-to-Speech framework
-import threading    # allows script to run completely seperate execution threads
+import sounddevice as sd    
+import numpy as np      
+from TTS.api import TTS     
+from faster_whisper import WhisperModel 
+import requests     
+from fastapi import FastAPI, WebSocket  
+import uvicorn      
+import asyncio      
+import threading    
+import base64  # NEW: Used to encode audio into a text-safe format
+import os      # NEW: Used to clean up temporary audio files
 
-# create the foundation for server
 app = FastAPI()
 clients = set()
-loop = asyncio.get_event_loop()
 
-# setup the translation engine
 print("Loading Whisper Model into VRAM...")
 whisper_model = WhisperModel("large-v3", device="cuda", compute_type="int8_float16")
 
 print("Loading TTS Model into VRAM...")
-tts = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
+tts = TTS("tts_models/uk/mai/vits").to("cuda")
 
 # === config ===
-DANTE_INPUT_ID = 78 # Dante Recieve 1-2
+DANTE_INPUT_ID = 90
 SAMPLE_RATE = 48000
-CHUNK_DURATION = 3 # process audio in 3 sec chunks
+CHUNK_DURATION = 3 
 
-# setup to get FastAPI to host html page
+audio_stream = None
+server_loop = None 
+
 @app.get("/", response_class=HTMLResponse)
 async def get_frontend():
     with open("index.html", "r", encoding="utf-8") as f:
         return f.read()
 
-# setup for others to connect and listen
-@app.websocket("/stream/uk") # opens a websocket at this URL
+@app.websocket("/stream/uk") 
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
-    clients.add(websocket) # adds them to the clients guest list
+    clients.add(websocket) 
+    print(f"Client connected. Total listeners: {len(clients)}")
+
     try:
         while True:
-            await websocket.recieve_text() # an infinite pause button (to not close the websocket)
-    except:
-        clients.remove(websocket) # if the connection breaks, remove the client from the list
+            await websocket.receive_text() 
+    except Exception:
+        pass
+    finally:
+        clients.remove(websocket) 
+        print(f"Client disconnected. Total listeners: {len(clients)}")
 
-# function to send out the final translated audio to the clients
-async def broadcast_audio(audio_bytes):
-    for client in clients: # for everyone connected
+# FIXED: Broadcasts a unified JSON package containing both text and audio
+async def broadcast_payload(payload: dict):
+    for client in clients: 
         try:
-            await client.send_bytes(audio_bytes) # send the translated audio file
+            await client.send_json(payload) 
         except:
-            pass # if connection drops from a user, pass and dont crash for everyone else
+            pass 
 
-# function to translate audio from eng -> ukr
 def process_audio(indata):
-
     # format the audio for Whisper
     audio_data = indata.flatten().astype(np.float32)
 
+    # downsample from 48kHz to 16kHz for Whisper
+    audio_16k = audio_data[::3]
+
     # transcribe to english
-    segments, _ = whisper_model.transcribe(audio_data, language="en")
+    segments, _ = whisper_model.transcribe(audio_16k, language="en")
     english_text = "".join([segment.text for segment in segments]).strip()
 
-    if not english_text:
-        return # if there is 3 seconds of silence
+    # Block empty text and common Whisper hallucinations
+    hallucinations = ["thank you", "thanks for watching", "i'll call you my friend", "so it's a little later"]
+    
+    # This now checks if ANY of the hallucination phrases are hidden inside the english text
+    if not english_text or any(h in english_text.lower() for h in hallucinations):
+        return
+    
     print(f"\n[English] {english_text}")
 
     # translate to ukrainian via local Ollama
@@ -72,51 +83,70 @@ def process_audio(indata):
             "prompt": f"Translate this English church sermon phrase to natural Ukrainian. Only return the Ukrainian text, no quotes or explanations: {english_text}",
             "stream": False
         })
-
-        ukrainian_text = response.json()['response']
+        ukrainian_text = response.json()['response'].strip()
         print(f"[Ukrainian] {ukrainian_text}")
     except Exception as e:
         print(f"Ollama Error: {e}")
         return
     
-    # make it voice
+    # FIXED: Generate audio using a unique filename for this specific thread
+    thread_id = threading.get_ident()
+    temp_filename = f"output_{thread_id}.wav"
+    
     try:
         tts.tts_to_file(
             text=ukrainian_text,
-            speaker_wav="pastor_reference.wav",
-            language="uk",
-            file_path="output.wav"
+            file_path=temp_filename
         )
 
-        # broadcast to all connected devices
-        with open("output.wav", "rb") as f:
+        # Read the audio data and convert it to a Base64 string
+        with open(temp_filename, "rb") as f:
             audio_bytes = f.read()
-        asyncio.run_coroutine_threadsafe(broadcast_audio(audio_bytes), loop)
+        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+
+        # Package everything together nicely
+        payload = {
+            "english": english_text,
+            "ukrainian": ukrainian_text,
+            "audio": audio_base64
+        }
+
+        # safely push the payload to the main server thread
+        asyncio.run_coroutine_threadsafe(broadcast_payload(payload), server_loop)
 
     except Exception as e:
-        print(f"TTS Error: {e}")
+        print(f"TTS/Broadcast Error: {e}")
+    finally:
+        # Clean up the file from disk after sending
+        if os.path.exists(temp_filename):
+            try:
+                os.remove(temp_filename)
+            except Exception:
+                pass
 
-# make sure audio is being processed
 def audio_callback(indata, frames, time, status):
-    if status: # if any error
-        print(status) # print the error
-
-    # run in background
+    if status: 
+        print(status) 
     threading.Thread(target=process_audio, args=(indata.copy(),)).start()
 
-# the start switch
 @app.on_event("startup")
 async def startup_event():
-    print("Connecting to Dante network...")
-    stream = sd.InputStream(
-        device=DANTE_INPUT_ID, # connect to the dante network ID
-        channels=1, # listen in Mono
-        samplerate=SAMPLE_RATE,  # the audio quality
-        blocksize=SAMPLE_RATE * CHUNK_DURATION, # creates a bucket to hold exactlty 144,000 audio samples
-        callback=audio_callback # dump blocksize bucket into the audio_callback function (to send to the AI)
-    )
-    stream.start() # starts the recording
+    global audio_stream, server_loop
+    server_loop = asyncio.get_running_loop() 
 
-# launches the server onto the network
+    print("Connecting to Dante network...")
+    try:
+        audio_stream = sd.InputStream(
+            device=DANTE_INPUT_ID, 
+            channels=1, 
+            samplerate=SAMPLE_RATE,  
+            blocksize=int(SAMPLE_RATE * CHUNK_DURATION), 
+            callback=audio_callback 
+        )
+        audio_stream.start() 
+        print("Dante stream successfully started!")
+    except Exception as e:
+        print(f"Failed to initialize Dante input device #{DANTE_INPUT_ID}: {e}")
+
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)
