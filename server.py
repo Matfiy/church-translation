@@ -12,18 +12,37 @@ import base64  # NEW: Used to encode audio into a text-safe format
 import os      # NEW: Used to clean up temporary audio files
 
 app = FastAPI()
-clients = set()
+
+# seperate guest lists for eng and ukr
+clients = {
+    "uk": set(),
+    "en": set()
+}
+
+current_source_lang = "auto"
 
 print("Loading Whisper Model into VRAM...")
 whisper_model = WhisperModel("large-v3", device="cuda", compute_type="int8_float16")
 
-print("Loading TTS Model into VRAM...")
-tts = TTS("tts_models/uk/mai/vits").to("cuda")
+print("Loading Ukrainian TTS Model...")
+tts_uk = TTS("tts_models/uk/mai/vits").to("cuda")
+
+print("Loading English TTS Model...")
+tts_en = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
 
 # === config ===
-DANTE_INPUT_ID = 90
 SAMPLE_RATE = 48000
 CHUNK_DURATION = 3 
+
+# function to locate the dante device id
+def get_dante_id():
+    devices = sd.query_devices()
+    for idx, dev in enumerate(devices):
+        if "DVS Recieve" in dev['name'] and "1-2" in dev['name'] and dev['max_input_channels'] > 0:
+            return idx
+    return 90
+
+DANTE_INPUT_ID = get_dante_id()
 
 audio_stream = None
 server_loop = None 
@@ -32,12 +51,23 @@ server_loop = None
 async def get_frontend():
     with open("index.html", "r", encoding="utf-8") as f:
         return f.read()
+    
+# The Admin endpoint to lock the language
+@app.post("/admin/set_language/{lang}")
+async def set_admin_language(lang: str):
+    global current_source_lang
+    if lang in ["en", "uk", "auto"]:
+        current_source_lang = lang
+        print(f"\n[ADMIN] Source language firmly locked to: {lang.upper()}")
+        return {"status": "success", "locked_to": lang}
+    return {"status": "error"}
 
-@app.websocket("/stream/uk") 
-async def websocket_endpoint(websocket: WebSocket):
+# dynamic websocket that accepts user's language choice
+@app.websocket("/stream/{language}") 
+async def websocket_endpoint(websocket: WebSocket, language: str):
     await websocket.accept()
-    clients.add(websocket) 
-    print(f"Client connected. Total listeners: {len(clients)}")
+    clients[language].add(websocket) 
+    print(f"Client joined {language.upper()}. Total listeners: {len(clients[language])}")
 
     try:
         while True:
@@ -45,12 +75,13 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception:
         pass
     finally:
-        clients.remove(websocket) 
-        print(f"Client disconnected. Total listeners: {len(clients)}")
+        if language in clients:
+            clients[language].remove(websocket) 
+            print(f"Client disconnected from {language.upper()}. Total listeners: {len(clients[language])}")
 
 # FIXED: Broadcasts a unified JSON package containing both text and audio
-async def broadcast_payload(payload: dict):
-    for client in clients: 
+async def broadcast_payload(payload: dict, target_language: str):
+    for client in clients[target_language]: 
         try:
             await client.send_json(payload) 
         except:
@@ -63,61 +94,89 @@ def process_audio(indata):
     # downsample from 48kHz to 16kHz for Whisper
     audio_16k = audio_data[::3]
 
-    # transcribe to english
-    segments, _ = whisper_model.transcribe(audio_16k, language="en")
-    english_text = "".join([segment.text for segment in segments]).strip()
+    if current_source_lang == "auto":
+        segments, info = whisper_model.transcribe(audio_16k, vad_filter=True)
+    else:
+        # Force Whisper to strictly listen in the locked language
+        segments, info = whisper_model.transcribe(audio_16k, vad_filter=True, language=current_source_lang)
+
+    # DEFENSE 1: Turn on VAD (Voice Activity Detection)
+    # This forces Whisper to completely ignore chunks of audio that don't contain actual human speech
+    detected_lang = info.language
+    spoken_text = "".join([segment.text for segment in segments]).strip()
+
+    # DEFENSE 2: The Strict Language Lock
+    # If Whisper somehow still guesses a random language, we silently kill the process right here
+    if detected_lang not in ["en", "uk"]:
+        return
 
     # Block empty text and common Whisper hallucinations
-    hallucinations = ["thank you", "thanks for watching", "i'll call you my friend", "so it's a little later"]
-    
-    # This now checks if ANY of the hallucination phrases are hidden inside the english text
-    if not english_text or any(h in english_text.lower() for h in hallucinations):
+    hallucinations = ["thank you", "thanks for watching", "i'll call you my friend", "so it's a little later", "дякую"]
+    if not spoken_text or any(h in spoken_text.lower() for h in hallucinations):
         return
     
-    print(f"\n[English] {english_text}")
+    print(f"\n[Detected: {detected_lang.upper()}] {spoken_text}")
 
-    # translate to ukrainian via local Ollama
-    try:
-        response = requests.post('http://localhost:11434/api/generate', json={
-            "model": "llama3:8b",
-            "prompt": f"Translate this English church sermon phrase to natural Ukrainian. Only return the Ukrainian text, no quotes or explanations: {english_text}",
-            "stream": False
-        })
-        ukrainian_text = response.json()['response'].strip()
-        print(f"[Ukrainian] {ukrainian_text}")
-    except Exception as e:
-        print(f"Ollama Error: {e}")
-        return
-    
-    # FIXED: Generate audio using a unique filename for this specific thread
     thread_id = threading.get_ident()
     temp_filename = f"output_{thread_id}.wav"
-    
+
     try:
-        tts.tts_to_file(
-            text=ukrainian_text,
-            file_path=temp_filename
-        )
+        # PATH A: Pastor speaks English -> Translate to Ukrainian
+        if detected_lang == "en" and len(clients["uk"]) > 0:
+            response = requests.post('http://localhost:11434/api/generate', json={
+                "model": "llama3:8b",
+                "prompt": f"Translate this English church sermon phrase to natural Ukrainian. Only return the Ukrainian text: {spoken_text}",
+                "stream": False
+            })
+            translated_text = response.json()['response'].strip()
+            
+            tts_uk.tts_to_file(text=translated_text, file_path=temp_filename)
 
-        # Read the audio data and convert it to a Base64 string
-        with open(temp_filename, "rb") as f:
-            audio_bytes = f.read()
-        audio_base64 = base64.b64encode(audio_bytes).decode('utf-8')
+            with open(temp_filename, "rb") as f:
+                audio_base64 = base64.b64encode(f.read()).decode('utf-8')
+            
+            payload = {"original": spoken_text, "translated": translated_text, "audio": audio_base64, "lang": "Ukrainian"}
+            asyncio.run_coroutine_threadsafe(broadcast_payload(payload, "uk"), server_loop)
 
-        # Package everything together nicely
-        payload = {
-            "english": english_text,
-            "ukrainian": ukrainian_text,
-            "audio": audio_base64
-        }
+        # PATH B: Pastor speaks Ukrainian -> Translate to English
+        elif detected_lang == "uk" and len(clients["en"]) > 0:
+            response = requests.post('http://localhost:11434/api/generate', json={
+                "model": "llama3:8b",
+                "prompt": f"Translate this Ukrainian church sermon phrase to natural English. Do not include any introductory remarks, quotes, or conversational text. Only return the direct English translation: {spoken_text}",
+                "stream": False
+            })
+            translated_text = response.json()['response'].strip()
+            
+            # Remove any stray markdown or quotes that make XTTS panic
+            translated_text = translated_text.replace('"', '').replace("'", "").replace("*", "").strip()
+            
+            # FIXED: Avoid XTTS short-phrase melting. If it's less than 3 words, 
+            # don't force a voice clone; drop it or use a threshold.
+            if len(translated_text.split()) < 3:
+                print(f"Skipping English TTS for short phrase to avoid distortion: {translated_text}")
+                return
+            
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            absolute_speaker_path = os.path.join(base_dir, "pastor_reference.wav")
+            
+            # FIXED: Added speed parameter (1.05) to prevent the audio from dragging or echoing
+            tts_en.tts_to_file(
+                text=translated_text, 
+                speaker_wav=absolute_speaker_path, 
+                language="en", 
+                file_path=temp_filename,
+                speed=1.05 
+            )
 
-        # safely push the payload to the main server thread
-        asyncio.run_coroutine_threadsafe(broadcast_payload(payload), server_loop)
+            with open(temp_filename, "rb") as f:
+                audio_base64 = base64.b64encode(f.read()).decode('utf-8')
+            
+            payload = {"original": spoken_text, "translated": translated_text, "audio": audio_base64, "lang": "English"}
+            asyncio.run_coroutine_threadsafe(broadcast_payload(payload, "en"), server_loop)
 
     except Exception as e:
-        print(f"TTS/Broadcast Error: {e}")
+        print(f"Pipeline Error: {e}")
     finally:
-        # Clean up the file from disk after sending
         if os.path.exists(temp_filename):
             try:
                 os.remove(temp_filename)

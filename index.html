@@ -23,24 +23,56 @@
 
     <main class="flex-1 max-w-2xl w-full mx-auto p-4 md:p-6 overflow-y-auto space-y-6">
 
-        <div id="setup-panel" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
-            <h2 class="text-lg font-semibold text-slate-900">Connect to Service</h2>
-            <p class="text-sm text-slate-500">Enter your translation server's Tailscale IP address to join the audio
-                stream.</p>
-            <div class="flex flex-col sm:flex-row gap-3">
-                <input type="text" id="server-ip" placeholder="e.g., 100.x.x.x"
-                    class="flex-1 px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm">
-                <button id="connect-btn" onclick="connectToServer()"
-                    class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition duration-200 shadow-sm cursor-pointer">
-                    Listen Live
-                </button>
+        <div class="bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-700 space-y-4 mb-6">
+            <div>
+                <h2 class="text-sm font-bold text-white tracking-wider uppercase">Tech Booth: Force Pastor's Language
+                </h2>
+                <p class="text-xs text-slate-400 mt-1">Override Whisper's auto-detection to prevent random language
+                    errors.</p>
             </div>
+            <div class="flex gap-2">
+                <button onclick="setSourceLanguage('auto')" id="btn-auto"
+                    class="flex-1 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg transition-colors">Auto-Detect</button>
+                <button onclick="setSourceLanguage('en')" id="btn-en"
+                    class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors">Lock
+                    English</button>
+                <button onclick="setSourceLanguage('uk')" id="btn-uk"
+                    class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors">Lock
+                    Ukrainian</button>
+            </div>
+        </div>
+
+        <div id="setup-panel" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-5">
+            <div>
+                <h2 class="text-lg font-semibold text-slate-900">Connect to Service</h2>
+                <p class="text-sm text-slate-500">Enter the IP address and select your language.</p>
+            </div>
+
+            <div class="flex flex-col gap-2">
+                <label class="text-xs font-bold text-slate-500 uppercase tracking-wider">Server IP</label>
+                <input type="text" id="server-ip" placeholder="e.g., 100.x.x.x"
+                    class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm">
+            </div>
+
+            <div class="flex flex-col gap-2">
+                <label class="text-xs font-bold text-slate-500 uppercase tracking-wider">I want to listen in...</label>
+                <select id="language-select"
+                    class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                    <option value="uk">Ukrainian (Translation)</option>
+                    <option value="en">English (Translation)</option>
+                </select>
+            </div>
+
+            <button id="connect-btn" onclick="connectToServer()"
+                class="w-full px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition duration-200 shadow-sm cursor-pointer mt-2">
+                Join Audio Stream
+            </button>
         </div>
 
         <div id="live-panel" class="hidden space-y-6 animate-fade-in">
             <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
                 <div>
-                    <h3 class="font-semibold text-slate-900">Ukrainian Feed</h3>
+                    <h3 id="feed-title" class="font-semibold text-slate-900">Live Feed</h3>
                     <p id="audio-status" class="text-sm text-slate-500">Audio stream ready.</p>
                 </div>
                 <div id="eq-animation" class="hidden items-end gap-1 h-6">
@@ -70,14 +102,31 @@
         let isPlaying = false;
 
         const serverIpInput = document.getElementById('server-ip');
+        const langSelect = document.getElementById('language-select');
         const connectBtn = document.getElementById('connect-btn');
         const statusBadge = document.getElementById('status-badge');
         const setupPanel = document.getElementById('setup-panel');
         const livePanel = document.getElementById('live-panel');
+        const feedTitle = document.getElementById('feed-title');
         const transcriptFeed = document.getElementById('transcript-feed');
         const audioPlayer = document.getElementById('audio-player');
         const eqAnimation = document.getElementById('eq-animation');
         const audioStatus = document.getElementById('audio-status');
+
+        // NEW: Function to send the language lock command to the Python server
+        function setSourceLanguage(lang) {
+            const ip = serverIpInput.value.trim() || window.location.hostname;
+
+            fetch(`http://${ip}:8000/admin/set_language/${lang}`, { method: 'POST' })
+                .then(response => {
+                    if (response.ok) {
+                        // Update UI button colors to show which mode is active
+                        document.getElementById('btn-auto').className = lang === 'auto' ? "flex-1 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg transition-colors" : "flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors";
+                        document.getElementById('btn-en').className = lang === 'en' ? "flex-1 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg transition-colors" : "flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors";
+                        document.getElementById('btn-uk').className = lang === 'uk' ? "flex-1 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg transition-colors" : "flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors";
+                    }
+                }).catch(err => console.error("Failed to set language:", err));
+        }
 
         if (window.location.hostname && window.location.hostname !== 'localhost') {
             serverIpInput.value = window.location.hostname;
@@ -85,13 +134,14 @@
 
         function connectToServer() {
             const ip = serverIpInput.value.trim();
+            const selectedLang = langSelect.value;
             if (!ip) return alert("Please enter a valid server IP address.");
 
             connectBtn.disabled = true;
             connectBtn.innerText = "Connecting...";
 
-            ws = new WebSocket(`ws://${ip}:8000/stream/uk`);
-            // Note: Removed binaryType = "blob" because we are parsing JSON strings now
+            // Dynamically connect to the selected language route
+            ws = new WebSocket(`ws://${ip}:8000/stream/${selectedLang}`);
 
             ws.onopen = () => {
                 statusBadge.className = "flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800";
@@ -99,27 +149,23 @@
                 setupPanel.classList.add('hidden');
                 livePanel.classList.remove('hidden');
 
+                feedTitle.innerText = `${selectedLang === 'uk' ? 'Ukrainian' : 'English'} Audio Feed`;
                 audioPlayer.play().catch(() => { });
             };
 
             ws.onmessage = async (event) => {
                 try {
-                    // Parse the packet string back into a structural object
                     const payload = JSON.parse(event.data);
+                    appendTranscriptCard(payload.original, payload.translated, payload.lang);
 
-                    // 1. Add text translation to our on-screen logs
-                    appendTranscriptCard(payload.english, payload.ukrainian);
-
-                    // 2. Process base64 text data back into binary audio array
                     if (payload.audio) {
                         const audioBlob = base64ToBlob(payload.audio, "audio/wav");
                         const audioUrl = URL.createObjectURL(audioBlob);
-
                         audioQueue.push(audioUrl);
                         processAudioQueue();
                     }
                 } catch (err) {
-                    console.error("Payload execution error:", err);
+                    console.error("Payload error:", err);
                 }
             };
 
@@ -129,7 +175,8 @@
                 setupPanel.classList.remove('hidden');
                 livePanel.classList.add('hidden');
                 connectBtn.disabled = false;
-                connectBtn.innerText = "Listen Live";
+                connectBtn.innerText = "Join Audio Stream";
+                transcriptFeed.innerHTML = ""; // Clear logs on disconnect
             };
         }
 
@@ -144,10 +191,9 @@
                 .then(() => {
                     eqAnimation.classList.remove('hidden');
                     eqAnimation.classList.add('flex');
-                    audioStatus.innerText = "Playing audio...";
+                    audioStatus.innerText = "Playing translation...";
                 })
                 .catch(e => {
-                    console.error("Playback error:", e);
                     isPlaying = false;
                     processAudioQueue();
                 });
@@ -157,35 +203,30 @@
                 URL.revokeObjectURL(nextAudioUrl);
                 eqAnimation.classList.add('hidden');
                 eqAnimation.classList.remove('flex');
-                audioStatus.innerText = "Listening for pastor...";
+                audioStatus.innerText = "Listening to stage...";
                 processAudioQueue();
             };
         }
 
-        // Dynamically designs and builds card modules in our scrolling feed log
-        function appendTranscriptCard(english, ukrainian) {
+        function appendTranscriptCard(original, translated, targetLang) {
             const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
             const card = document.createElement('div');
             card.className = "bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-2 mt-4";
 
             card.innerHTML = `
-                <div class="flex justify-between items-center text-[10px] font-mono text-slate-400">
-                    <span class="font-bold tracking-wider">AUDIO ENGINE ACTIVE</span>
+                <div class="flex justify-between items-center text-[10px] font-mono text-slate-400 uppercase">
+                    <span class="font-bold tracking-wider">${targetLang} Engine</span>
                     <span>${timestamp}</span>
                 </div>
-                <p class="text-sm text-slate-500 font-medium">${english}</p>
-                <p class="text-base text-slate-900 font-semibold border-t border-slate-100 pt-2">${ukrainian}</p>
+                <p class="text-sm text-slate-500 font-medium">${original}</p>
+                <p class="text-base text-slate-900 font-semibold border-t border-slate-100 pt-2">${translated}</p>
             `;
-
-            // Prepend lets new speaker translations appear cleanly right at the top
             transcriptFeed.prepend(card);
         }
 
-        // System tool to change base64 back into raw streaming binary audio data
         function base64ToBlob(base64Data, contentType) {
             const byteCharacters = atob(base64Data);
             const byteArrays = [];
-
             for (let offset = 0; offset < byteCharacters.length; offset += 512) {
                 const slice = byteCharacters.slice(offset, offset + 512);
                 const byteNumbers = new Array(slice.length);
