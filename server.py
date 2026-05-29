@@ -45,7 +45,7 @@ async def broadcast_audio(audio_bytes):
             pass # if connection drops from a user, pass and dont crash for everyone else
 
 # function to translate audio from eng -> ukr
-def process_audio(indate):
+def process_audio(indata):
 
     # format the audio for Whisper
     audio_data = indata.flatten().astype(np.float32)
@@ -54,7 +54,8 @@ def process_audio(indate):
     segments, _ = whisper_model.transcribe(audio_data, language="en")
     english_text = "".join([segment.text for segment in segments]).strip()
 
-    if not english_text: return
+    if not english_text:
+        return # if there is 3 seconds of silence
     print(f"\n[English] {english_text}")
 
     # translate to ukrainian via local Ollama
@@ -75,7 +76,7 @@ def process_audio(indate):
     try:
         tts.tts_to_file(
             text=ukrainian_text,
-            speaker_wav="pastor.reference.wav",
+            speaker_wav="pastor_reference.wav",
             language="uk",
             file_path="output.wav"
         )
@@ -87,3 +88,11 @@ def process_audio(indate):
 
     except Exception as e:
         print(f"TTS Error: {e}")
+
+# make sure audio is being processed
+def audio_callback(indata, frames, time, status):
+    if status: # if any error
+        print(status) # print the error
+
+    # run in background
+    threading.Thread(target=process_audio, args=(indata.copy(),)).start()
