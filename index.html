@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Live Church Translation</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+</head>
+
+<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col justify-between">
+
+    <header class="bg-white shadow-sm border-b border-slate-200 py-4 px-6 sticky top-0 z-10">
+        <div class="max-w-2xl mx-auto flex items-center justify-between">
+            <h1 class="text-xl font-bold tracking-tight text-slate-900">Live Translation</h1>
+            <div id="status-badge"
+                class="flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">
+                <span class="h-2 w-2 rounded-full bg-amber-500 animate-pulse"></span>
+                Disconnected
+            </div>
+        </div>
+    </header>
+
+    <main class="flex-1 max-w-2xl w-full mx-auto p-4 md:p-6 overflow-y-auto space-y-6">
+
+        <div id="setup-panel" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-4">
+            <h2 class="text-lg font-semibold text-slate-900">Connect to Service</h2>
+            <p class="text-sm text-slate-500">Enter your translation server's Tailscale IP address to join the audio
+                stream.</p>
+            <div class="flex flex-col sm:flex-row gap-3">
+                <input type="text" id="server-ip" placeholder="e.g., 100.x.x.x"
+                    class="flex-1 px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm">
+                <button id="connect-btn" onclick="connectToServer()"
+                    class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition duration-200 shadow-sm cursor-pointer">
+                    Listen Live
+                </button>
+            </div>
+        </div>
+
+        <div id="live-panel" class="hidden space-y-6 animate-fade-in">
+            <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
+                <div>
+                    <h3 class="font-semibold text-slate-900">Ukrainian Feed</h3>
+                    <p id="audio-status" class="text-sm text-slate-500">Audio stream ready.</p>
+                </div>
+                <div id="eq-animation" class="hidden items-end gap-1 h-6">
+                    <span class="w-1 bg-blue-600 h-3 animate-bounce" style="animation-duration: 0.6s"></span>
+                    <span class="w-1 bg-blue-600 h-5 animate-bounce" style="animation-duration: 0.4s"></span>
+                    <span class="w-1 bg-blue-600 h-2 animate-bounce" style="animation-duration: 0.8s"></span>
+                </div>
+            </div>
+
+            <div class="space-y-4">
+                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Live Transcript Log</h3>
+                <div id="transcript-feed" class="space-y-4 min-h-[200px]">
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="py-4 text-center text-xs text-slate-400 border-t border-slate-100 bg-white">
+        Powered by OpenAI Whisper & Llama 3
+    </footer>
+
+    <audio id="audio-player" class="hidden"></audio>
+
+    <script>
+        let ws;
+        const audioQueue = [];
+        let isPlaying = false;
+
+        const serverIpInput = document.getElementById('server-ip');
+        const connectBtn = document.getElementById('connect-btn');
+        const statusBadge = document.getElementById('status-badge');
+        const setupPanel = document.getElementById('setup-panel');
+        const livePanel = document.getElementById('live-panel');
+        const transcriptFeed = document.getElementById('transcript-feed');
+        const audioPlayer = document.getElementById('audio-player');
+        const eqAnimation = document.getElementById('eq-animation');
+        const audioStatus = document.getElementById('audio-status');
+
+        // Automatically fill in current URL IP if hosted on the server
+        if (window.location.hostname && window.location.hostname !== 'localhost') {
+            serverIpInput.value = window.location.hostname;
+        }
+
+        function connectToServer() {
+            const ip = serverIpInput.value.trim();
+            if (!ip) return alert("Please enter a valid server IP address.");
+
+            connectBtn.disabled = true;
+            connectBtn.innerText = "Connecting...";
+
+            // Connect to the secure or standard websocket endpoint on port 8000
+            ws = new WebSocket(`ws://${ip}:8000/stream/uk`);
+            ws.binaryType = "blob"; // Audio data comes down as raw blobs
+
+            ws.onopen = () => {
+                statusBadge.className = "flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800";
+                statusBadge.innerHTML = `<span class="h-2 w-2 rounded-full bg-emerald-500 animate-ping"></span> Live`;
+                setupPanel.classList.add('hidden');
+                livePanel.classList.remove('hidden');
+
+                // Audio elements require an initial user click permission to play audio on mobile devices
+                audioPlayer.play().catch(() => { });
+            };
+
+            ws.onmessage = async (event) => {
+                if (event.data instanceof Blob) {
+                    // Queue up incoming audio binary chunks
+                    const audioUrl = URL.createObjectURL(event.data);
+                    audioQueue.push(audioUrl);
+                    processAudioQueue();
+                }
+            };
+
+            ws.onclose = () => {
+                statusBadge.className = "flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800";
+                statusBadge.innerHTML = `<span class="h-2 w-2 rounded-full bg-red-500"></span> Disconnected`;
+                setupPanel.classList.remove('hidden');
+                livePanel.classList.add('hidden');
+                connectBtn.disabled = false;
+                connectBtn.innerText = "Listen Live";
+            };
+        }
+
+        // Sequential audio player manager to prevent overlapping playback
+        function processAudioQueue() {
+            if (isPlaying || audioQueue.length === 0) return;
+
+            isPlaying = true;
+            const nextAudioUrl = audioQueue.shift();
+            audioPlayer.src = nextAudioUrl;
+
+            audioPlayer.play()
+                .then(() => {
+                    eqAnimation.classList.remove('hidden');
+                    eqAnimation.classList.add('flex');
+                    audioStatus.innerText = "Playing audio...";
+                })
+                .catch(e => {
+                    console.error("Playback error:", e);
+                    isPlaying = false;
+                    processAudioQueue();
+                });
+
+            audioPlayer.onended = () => {
+                isPlaying = false;
+                URL.revokeObjectURL(nextAudioUrl); // Clean browser memory cache
+                eqAnimation.classList.add('hidden');
+                eqAnimation.classList.remove('flex');
+                audioStatus.innerText = "Listening for pastor...";
+                processAudioQueue(); // Trigger next chunk if ready
+            };
+        }
+    </script>
+</body>
+
+</html>

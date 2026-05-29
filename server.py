@@ -1,3 +1,4 @@
+from fastapi.responses import HTMLResponse 
 import sounddevice as sd    # connects python to computer's audio hardware
 import numpy as np      # industry standard for heavy-duty mathematics
 from faster_whisper import WhisperModel # OpenAI's whisper model
@@ -25,9 +26,15 @@ DANTE_INPUT_ID = 78 # Dante Recieve 1-2
 SAMPLE_RATE = 48000
 CHUNK_DURATION = 3 # process audio in 3 sec chunks
 
+# setup to get FastAPI to host html page
+@app.get("/", response_class=HTMLResponse)
+async def get_frontend():
+    with open("index.html", "r", encoding="utf-8") as f:
+        return f.read()
+
 # setup for others to connect and listen
 @app.websocket("/stream/uk") # opens a websocket at this URL
-async def websocket_endpoint(webscoket: WebSocket):
+async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     clients.add(websocket) # adds them to the clients guest list
     try:
