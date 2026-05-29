@@ -96,3 +96,20 @@ def audio_callback(indata, frames, time, status):
 
     # run in background
     threading.Thread(target=process_audio, args=(indata.copy(),)).start()
+
+# the start switch
+@app.on_event("startup")
+async def startup_event():
+    print("Connecting to Dante network...")
+    stream = sd.InputStream(
+        device=DANTE_INPUT_ID, # connect to the dante network ID
+        channels=1, # listen in Mono
+        samplerate=SAMPLE_RATE,  # the audio quality
+        blocksize=SAMPLE_RATE * CHUNK_DURATION, # creates a bucket to hold exactlty 144,000 audio samples
+        callback=audio_callback # dump blocksize bucket into the audio_callback function (to send to the AI)
+    )
+    stream.start() # starts the recording
+
+# launches the server onto the network
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
