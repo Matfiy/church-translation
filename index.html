@@ -5,223 +5,986 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Live Church Translation</title>
-    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-</head>
-
-<body class="bg-slate-50 text-slate-800 font-sans min-h-screen flex flex-col justify-between">
-
-    <header class="bg-white shadow-sm border-b border-slate-200 py-4 px-6 sticky top-0 z-10">
-        <div class="max-w-2xl mx-auto flex items-center justify-between">
-            <h1 class="text-xl font-bold tracking-tight text-slate-900">Live Translation</h1>
-            <div id="status-badge"
-                class="flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-amber-100 text-amber-800">
-                <span class="h-2 w-2 rounded-full bg-amber-500 animate-pulse"></span>
-                Disconnected
-            </div>
-        </div>
-    </header>
-
-    <main class="flex-1 max-w-2xl w-full mx-auto p-4 md:p-6 overflow-y-auto space-y-6">
-
-        <div class="bg-slate-800 p-6 rounded-2xl shadow-sm border border-slate-700 space-y-4 mb-6">
-            <div>
-                <h2 class="text-sm font-bold text-white tracking-wider uppercase">Tech Booth: Force Pastor's Language
-                </h2>
-                <p class="text-xs text-slate-400 mt-1">Override Whisper's auto-detection to prevent random language
-                    errors.</p>
-            </div>
-            <div class="flex gap-2">
-                <button onclick="setSourceLanguage('auto')" id="btn-auto"
-                    class="flex-1 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg transition-colors">Auto-Detect</button>
-                <button onclick="setSourceLanguage('en')" id="btn-en"
-                    class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors">Lock
-                    English</button>
-                <button onclick="setSourceLanguage('uk')" id="btn-uk"
-                    class="flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors">Lock
-                    Ukrainian</button>
-            </div>
-        </div>
-
-        <div id="setup-panel" class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 space-y-5">
-            <div>
-                <h2 class="text-lg font-semibold text-slate-900">Connect to Service</h2>
-                <p class="text-sm text-slate-500">Enter the IP address and select your language.</p>
-            </div>
-
-            <div class="flex flex-col gap-2">
-                <label class="text-xs font-bold text-slate-500 uppercase tracking-wider">Server IP</label>
-                <input type="text" id="server-ip" placeholder="e.g., 100.x.x.x"
-                    class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono text-sm">
-            </div>
-
-            <div class="flex flex-col gap-2">
-                <label class="text-xs font-bold text-slate-500 uppercase tracking-wider">I want to listen in...</label>
-                <select id="language-select"
-                    class="w-full px-4 py-3 border border-slate-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
-                    <option value="uk">Ukrainian (Translation)</option>
-                    <option value="en">English (Translation)</option>
-                </select>
-            </div>
-
-            <button id="connect-btn" onclick="connectToServer()"
-                class="w-full px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-xl transition duration-200 shadow-sm cursor-pointer mt-2">
-                Join Audio Stream
-            </button>
-        </div>
-
-        <div id="live-panel" class="hidden space-y-6 animate-fade-in">
-            <div class="bg-white p-6 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between">
-                <div>
-                    <h3 id="feed-title" class="font-semibold text-slate-900">Live Feed</h3>
-                    <p id="audio-status" class="text-sm text-slate-500">Audio stream ready.</p>
-                </div>
-                <div id="eq-animation" class="hidden items-end gap-1 h-6">
-                    <span class="w-1 bg-blue-600 h-3 animate-bounce" style="animation-duration: 0.6s"></span>
-                    <span class="w-1 bg-blue-600 h-5 animate-bounce" style="animation-duration: 0.4s"></span>
-                    <span class="w-1 bg-blue-600 h-2 animate-bounce" style="animation-duration: 0.8s"></span>
-                </div>
-            </div>
-
-            <div class="space-y-4">
-                <h3 class="text-xs font-bold uppercase tracking-wider text-slate-400">Live Transcript Log</h3>
-                <div id="transcript-feed" class="space-y-4 min-h-[200px]">
-                </div>
-            </div>
-        </div>
-    </main>
-
-    <footer class="py-4 text-center text-xs text-slate-400 border-t border-slate-100 bg-white">
-        Powered by OpenAI Whisper & Llama 3
-    </footer>
-
-    <audio id="audio-player" class="hidden"></audio>
-
-    <script>
-        let ws;
-        const audioQueue = [];
-        let isPlaying = false;
-
-        const serverIpInput = document.getElementById('server-ip');
-        const langSelect = document.getElementById('language-select');
-        const connectBtn = document.getElementById('connect-btn');
-        const statusBadge = document.getElementById('status-badge');
-        const setupPanel = document.getElementById('setup-panel');
-        const livePanel = document.getElementById('live-panel');
-        const feedTitle = document.getElementById('feed-title');
-        const transcriptFeed = document.getElementById('transcript-feed');
-        const audioPlayer = document.getElementById('audio-player');
-        const eqAnimation = document.getElementById('eq-animation');
-        const audioStatus = document.getElementById('audio-status');
-
-        // NEW: Function to send the language lock command to the Python server
-        function setSourceLanguage(lang) {
-            const ip = serverIpInput.value.trim() || window.location.hostname;
-
-            fetch(`http://${ip}:8000/admin/set_language/${lang}`, { method: 'POST' })
-                .then(response => {
-                    if (response.ok) {
-                        // Update UI button colors to show which mode is active
-                        document.getElementById('btn-auto').className = lang === 'auto' ? "flex-1 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg transition-colors" : "flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors";
-                        document.getElementById('btn-en').className = lang === 'en' ? "flex-1 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg transition-colors" : "flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors";
-                        document.getElementById('btn-uk').className = lang === 'uk' ? "flex-1 py-2 bg-blue-600 text-white text-xs font-bold rounded-lg transition-colors" : "flex-1 py-2 bg-slate-700 hover:bg-slate-600 text-white text-xs font-bold rounded-lg transition-colors";
-                    }
-                }).catch(err => console.error("Failed to set language:", err));
+    <style>
+        :root {
+            --accent: #2F6BFF;
+            --ink: 20, 22, 26;
+            --cap-size: 20px;
         }
 
-        if (window.location.hostname && window.location.hostname !== 'localhost') {
-            serverIpInput.value = window.location.hostname;
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: #f4f3ef;
+            color: rgb(var(--ink));
+            font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+        }
+
+        .app {
+            width: 100%;
+            max-width: 460px;
+            min-height: 100vh;
+            background: #ffffff;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 0 60px rgba(0, 0, 0, .05);
+        }
+
+        .live-body {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .live-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .live-sidebar {
+            display: none;
+        }
+
+        /* header */
+        .topbar {
+            flex: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 18px 24px;
+            border-bottom: 1px solid rgba(var(--ink), .09);
+        }
+
+        .topbar-title-group {
+            display: flex;
+            align-items: baseline;
+            gap: 16px;
+        }
+
+        .topbar-title {
+            font-size: 15px;
+            letter-spacing: -.01em;
+        }
+
+        .topbar-sub {
+            display: none;
+            font: 400 13px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .45);
+        }
+
+        .status-pill {
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            font: 500 10px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .12em;
+            text-transform: uppercase;
+            color: rgba(var(--ink), .5);
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 99px;
+            background: rgba(var(--ink), .25);
+            flex: none;
+        }
+
+        .dot.live {
+            background: var(--accent);
+            animation: pulse 1.6s ease-in-out infinite;
+        }
+
+        @keyframes pulse {
+
+            0%,
+            100% {
+                opacity: 1;
+            }
+
+            50% {
+                opacity: .3;
+            }
+        }
+
+        @keyframes blink {
+
+            0%,
+            49% {
+                opacity: 1;
+            }
+
+            50%,
+            100% {
+                opacity: 0;
+            }
+        }
+
+        @keyframes eq {
+
+            0%,
+            100% {
+                transform: scaleY(.25);
+            }
+
+            50% {
+                transform: scaleY(1);
+            }
+        }
+
+        /* setup panel */
+        #setup-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            padding: 40px 28px 32px;
+        }
+
+        .eyebrow {
+            font: 500 10.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .16em;
+            text-transform: uppercase;
+            color: var(--accent);
+        }
+
+        h1 {
+            margin: 16px 0 0;
+            font: 400 30px/1.2 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: -.025em;
+        }
+
+        .lede {
+            margin: 14px 0 0;
+            font: 400 14.5px/1.6 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .5);
+        }
+
+        .lang-list {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            margin-top: 32px;
+        }
+
+        .lang-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 17px 19px;
+            border-radius: 13px;
+            cursor: pointer;
+            border: 1px solid rgba(var(--ink), .13);
+            background: #fff;
+            transition: background .15s ease, border-color .15s ease;
+        }
+
+        .lang-row.on {
+            border-color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 7%, #fff);
+        }
+
+        .lang-names {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .lang-name {
+            font: 400 17px/1.2 "Helvetica Neue", Helvetica, sans-serif;
+        }
+
+        .lang-native {
+            font: 400 12.5px/1.2 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .42);
+        }
+
+        .radio-dot {
+            width: 19px;
+            height: 19px;
+            border-radius: 99px;
+            flex: none;
+            border: 1px solid rgba(var(--ink), .22);
+            background: #fff;
+        }
+
+        .lang-row.on .radio-dot {
+            border-color: var(--accent);
+            box-shadow: inset 0 0 0 4px var(--accent);
+        }
+
+        .more-langs-note {
+            margin: 14px 2px 0;
+            font: 400 12px/1.5 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .38);
+        }
+
+        .spacer {
+            flex: 1;
+        }
+
+        .connect-btn {
+            text-align: center;
+            padding: 19px 0;
+            border-radius: 14px;
+            background: var(--accent);
+            color: #fff;
+            cursor: pointer;
+            font: 400 16.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            box-shadow: 0 8px 22px color-mix(in srgb, var(--accent) 30%, transparent);
+            margin-top: 34px;
+            border: none;
+        }
+
+        .connect-btn:active {
+            opacity: .85;
+        }
+
+        .connect-row {
+            display: contents;
+        }
+
+        .headphones-note {
+            margin-top: 14px;
+            text-align: center;
+            font: 400 12px/1.4 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .38);
+        }
+
+        /* live panel */
+        #live-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-height: 0;
+        }
+
+        .live-header {
+            flex: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 16px 24px;
+            border-bottom: 1px solid rgba(var(--ink), .09);
+        }
+
+        .live-tag {
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            font: 500 10.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .15em;
+            text-transform: uppercase;
+            color: rgba(var(--ink), .62);
+        }
+
+        .leave-btn {
+            cursor: pointer;
+            font: 400 13px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .55);
+            border: 1px solid rgba(var(--ink), .14);
+            border-radius: 100px;
+            padding: 9px 15px;
+            background: #fff;
+        }
+
+        .playbar {
+            flex: none;
+            padding: 22px 24px;
+            border-bottom: 1px solid rgba(var(--ink), .09);
+            display: flex;
+            align-items: center;
+            gap: 18px;
+            background: #f7f8fa;
+        }
+
+        .mute-btn {
+            width: 46px;
+            height: 46px;
+            flex: none;
+            border-radius: 99px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            cursor: pointer;
+            background: var(--accent);
+            color: #fff;
+            border: none;
+            font-size: 16px;
+            box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 28%, transparent);
+        }
+
+        .playbar-main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+            min-width: 0;
+        }
+
+        .eq {
+            display: flex;
+            align-items: flex-end;
+            gap: 3px;
+            height: 22px;
+        }
+
+        .eq span {
+            flex: 1;
+            min-width: 2px;
+            border-radius: 2px;
+            background: rgba(var(--ink), .2);
+            transform-origin: bottom;
+        }
+
+        .eq.playing span {
+            background: var(--accent);
+        }
+
+        .eq.playing span:nth-child(1) { height: 8px; animation: eq 720ms ease-in-out infinite; }
+        .eq.playing span:nth-child(2) { height: 18px; animation: eq 640ms ease-in-out 90ms infinite; }
+        .eq.playing span:nth-child(3) { height: 12px; animation: eq 880ms ease-in-out 180ms infinite; }
+        .eq.playing span:nth-child(4) { height: 20px; animation: eq 560ms ease-in-out 270ms infinite; }
+        .eq.playing span:nth-child(5) { height: 10px; animation: eq 760ms ease-in-out 360ms infinite; }
+        .eq.playing span:nth-child(6) { height: 16px; animation: eq 680ms ease-in-out 450ms infinite; }
+        .eq.playing span:nth-child(7) { height: 9px; animation: eq 840ms ease-in-out 540ms infinite; }
+        .eq.playing span:nth-child(8) { height: 19px; animation: eq 600ms ease-in-out 630ms infinite; }
+
+        .vol-row {
+            display: flex;
+            align-items: center;
+            gap: 11px;
+        }
+
+        .vol-label {
+            font: 500 10px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .12em;
+            color: rgba(var(--ink), .4);
+            flex: none;
+        }
+
+        input[type="range"] {
+            -webkit-appearance: none;
+            appearance: none;
+            flex: 1;
+            height: 4px;
+            border-radius: 99px;
+            background: rgba(var(--ink), .13);
+            cursor: pointer;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 15px;
+            height: 15px;
+            border-radius: 99px;
+            background: var(--accent);
+            border: 2px solid #fff;
+            box-shadow: 0 0 0 1px rgba(var(--ink), .15);
+        }
+
+        input[type="range"]::-moz-range-thumb {
+            width: 15px;
+            height: 15px;
+            border-radius: 99px;
+            background: var(--accent);
+            border: 2px solid #fff;
+        }
+
+        .vol-value {
+            font: 400 11.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .42);
+            width: 28px;
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            flex: none;
+        }
+
+        .caption-row {
+            flex: none;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 24px;
+            border-bottom: 1px solid rgba(var(--ink), .09);
+        }
+
+        .caption-label {
+            font: 500 10px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .14em;
+            text-transform: uppercase;
+            color: rgba(var(--ink), .38);
+        }
+
+        .size-options {
+            display: flex;
+            gap: 7px;
+        }
+
+        .size-btn {
+            width: 32px;
+            height: 28px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border-radius: 8px;
+            cursor: pointer;
+            font: 400 12px/1 "Helvetica Neue", Helvetica, sans-serif;
+            border: 1px solid rgba(var(--ink), .14);
+            background: #fff;
+            color: rgba(var(--ink), .45);
+        }
+
+        .size-btn.on {
+            border-color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 8%, #fff);
+            color: var(--accent);
+        }
+
+        #transcript-feed {
+            flex: 1;
+            overflow-y: auto;
+            padding: 24px 24px 32px;
+            display: flex;
+            flex-direction: column;
+            gap: 22px;
+        }
+
+        .line {
+            opacity: .55;
+            transition: opacity .4s ease;
+        }
+
+        .line.latest {
+            opacity: 1;
+        }
+
+        .line-time {
+            font: 400 11px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .06em;
+            color: rgba(var(--ink), .32);
+            margin-bottom: 8px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .line-text {
+            font: 400 15px/1.5 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: -.01em;
+            text-wrap: pretty;
+        }
+
+        .line.latest .line-text {
+            font-size: var(--cap-size);
+            line-height: 1.45;
+        }
+
+        .caret {
+            display: inline-block;
+            width: 2px;
+            height: .95em;
+            margin-left: 4px;
+            vertical-align: -.1em;
+            background: var(--accent);
+            animation: blink 1s step-end infinite;
+        }
+
+        /* desktop-only combined bottom bar (playback + volume + caption size) */
+        .bottom-bar {
+            display: none;
+            flex: none;
+            align-items: center;
+            gap: 24px;
+            margin-top: 44px;
+            padding: 20px 56px 22px;
+            border-top: 1px solid rgba(var(--ink), .09);
+            background: #f7f8fa;
+        }
+
+        .bottom-bar .eq {
+            width: 200px;
+            height: 26px;
+        }
+
+        .bottom-bar .vol-row {
+            width: 190px;
+        }
+
+        .caption-inline {
+            margin-left: auto;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .sidebar-spacer {
+            flex: 1;
+        }
+
+        /* desktop / laptop layout — matches design doc's "2a" listener view */
+        @media (min-width: 860px) {
+            .topbar-sub {
+                display: inline;
+            }
+
+            .app {
+                max-width: 1180px;
+                box-shadow: none;
+                border-left: 1px solid rgba(var(--ink), .08);
+                border-right: 1px solid rgba(var(--ink), .08);
+            }
+
+            .topbar {
+                padding: 20px 40px;
+            }
+
+            #setup-panel {
+                padding: 64px 80px;
+                max-width: 760px;
+                margin: 0 auto;
+                width: 100%;
+            }
+
+            h1 {
+                font-size: 40px;
+                max-width: 620px;
+            }
+
+            .lede {
+                font-size: 15.5px;
+                max-width: 520px;
+            }
+
+            .lang-list {
+                flex-direction: row;
+                gap: 14px;
+                margin-top: 44px;
+            }
+
+            .lang-row {
+                flex: 1;
+                padding: 22px 24px;
+            }
+
+            .lang-name {
+                font-size: 19px;
+            }
+
+            .spacer {
+                display: none;
+            }
+
+            .connect-row {
+                display: flex;
+                align-items: center;
+                gap: 22px;
+                margin-top: 40px;
+            }
+
+            .connect-btn {
+                width: auto;
+                padding: 19px 40px;
+                margin-top: 0;
+            }
+
+            .headphones-note {
+                margin-top: 0;
+            }
+
+            .eyebrow {
+                display: none;
+            }
+
+            .live-body {
+                flex-direction: row;
+            }
+
+            /* 2a merges playback + volume + caption size into one bottom
+               bar and drops the mobile-only live-header/caption-row */
+            .live-header,
+            .playbar,
+            .caption-row {
+                display: none;
+            }
+
+            .bottom-bar {
+                display: flex;
+            }
+
+            #transcript-feed {
+                flex: 1;
+                padding: 48px 56px 0;
+                justify-content: flex-end;
+                gap: 30px;
+            }
+
+            .line {
+                opacity: .38;
+            }
+
+            .line.latest {
+                opacity: 1;
+            }
+
+            .line-text {
+                font-size: calc(var(--cap-size) + 6px);
+            }
+
+            .line.latest .line-text {
+                font-size: calc(var(--cap-size) + 15px);
+                max-width: 820px;
+            }
+
+            .live-sidebar {
+                display: flex;
+                flex-direction: column;
+                gap: 8px;
+                width: 262px;
+                flex: none;
+                border-left: 1px solid rgba(var(--ink), .09);
+                padding: 26px 20px;
+            }
+
+            .sidebar-label {
+                font: 500 10px/1 "Helvetica Neue", Helvetica, sans-serif;
+                letter-spacing: .15em;
+                text-transform: uppercase;
+                color: rgba(var(--ink), .38);
+                padding: 0 4px 10px;
+            }
+
+            .rail-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 10px;
+                padding: 13px 15px;
+                border-radius: 10px;
+                cursor: pointer;
+                border: 1px solid transparent;
+                background: transparent;
+            }
+
+            .rail-row.on {
+                border-color: var(--accent);
+                background: color-mix(in srgb, var(--accent) 7%, #fff);
+            }
+
+            .rail-name {
+                font: 400 14.5px/1.2 "Helvetica Neue", Helvetica, sans-serif;
+                color: rgba(var(--ink), .62);
+            }
+
+            .rail-row.on .rail-name {
+                color: var(--accent);
+            }
+
+            .rail-native {
+                font: 400 12px/1.2 "Helvetica Neue", Helvetica, sans-serif;
+                color: rgba(var(--ink), .35);
+            }
+
+            .sidebar-leave {
+                text-align: center;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="app">
+        <div class="topbar">
+            <div class="topbar-title-group">
+                <span class="topbar-title">Live Translation</span>
+                <span class="topbar-sub">Church Translation</span>
+            </div>
+            <div class="status-pill">
+                <span class="dot" id="status-dot"></span>
+                <span id="status-text">Ready</span>
+            </div>
+        </div>
+
+        <!-- Setup panel -->
+        <div id="setup-panel">
+            <div class="eyebrow">Live Service</div>
+            <h1>Choose the language you want to hear</h1>
+            <p class="lede">Audio and captions arrive together. You can switch at any time.</p>
+
+            <div class="lang-list" id="lang-list"></div>
+            <p class="more-langs-note">Only English &amp; Ukrainian are supported right now &mdash; more languages
+                hopefully coming soon!</p>
+
+            <div class="spacer"></div>
+            <div class="connect-row">
+                <button class="connect-btn" id="connect-btn" onclick="connectToServer()">Connect to English</button>
+                <p class="headphones-note">Headphones recommended</p>
+            </div>
+        </div>
+
+        <!-- Live panel -->
+        <div id="live-panel" style="display:none">
+            <div class="live-header">
+                <div class="live-tag">
+                    <span class="dot live"></span>
+                    <span id="live-lang-label">Live</span>
+                </div>
+                <button class="leave-btn" onclick="disconnectFromServer()">Leave</button>
+            </div>
+
+            <div class="live-body">
+                <div class="live-main">
+                    <div class="playbar">
+                        <button class="mute-btn" id="mute-btn" onclick="toggleMute()">&#128266;</button>
+                        <div class="playbar-main">
+                            <div class="eq playing" id="eq-animation">
+                                <span></span><span></span><span></span><span></span>
+                                <span></span><span></span><span></span><span></span>
+                            </div>
+                            <div class="vol-row">
+                                <span class="vol-label">VOL</span>
+                                <input type="range" class="vol-slider" id="vol-slider" min="0" max="100" value="85">
+                                <span class="vol-value" id="vol-value">85</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="caption-row">
+                        <span class="caption-label">Caption size</span>
+                        <div class="size-options" id="size-options"></div>
+                    </div>
+
+                    <div id="transcript-feed"></div>
+
+                    <!-- desktop-only: playback + volume + caption size in one bar -->
+                    <div class="bottom-bar">
+                        <button class="mute-btn" id="mute-btn-lg" onclick="toggleMute()">&#128266;</button>
+                        <div class="eq playing" id="eq-animation-lg">
+                            <span></span><span></span><span></span><span></span>
+                            <span></span><span></span><span></span><span></span>
+                        </div>
+                        <div class="vol-row">
+                            <span class="vol-label">VOL</span>
+                            <input type="range" class="vol-slider" id="vol-slider-lg" min="0" max="100" value="85">
+                            <span class="vol-value" id="vol-value-lg">85</span>
+                        </div>
+                        <div class="caption-inline">
+                            <span class="caption-label">Caption size</span>
+                            <div class="size-options" id="size-options-lg"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="live-sidebar">
+                    <span class="sidebar-label">Language</span>
+                    <div id="rail-list"></div>
+                    <div class="sidebar-spacer"></div>
+                    <div class="leave-btn sidebar-leave" onclick="disconnectFromServer()">Leave</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const LANGUAGES = [
+            { code: 'en', name: 'English', native: 'English' },
+            { code: 'uk', name: 'Ukrainian', native: 'Українська' },
+        ];
+        const SIZES = { S: 16, M: 20, L: 26 };
+
+        let selectedLang = 'en';
+        let captionSize = 'M';
+        let ws;
+        let audioCtx;
+        let gainNode;
+        let lastVolume = 0.85;
+        let muted = false;
+        const audioQueue = [];
+        let nextStartTime = 0;
+        let lineCount = 0;
+        let latestLineEl = null;
+
+        function renderLangList() {
+            const list = document.getElementById('lang-list');
+            list.innerHTML = '';
+            LANGUAGES.forEach(lang => {
+                const row = document.createElement('div');
+                row.className = 'lang-row' + (lang.code === selectedLang ? ' on' : '');
+                row.onclick = () => { selectedLang = lang.code; renderLangList(); updateConnectLabel(); };
+                row.innerHTML = `
+                    <div class="lang-names">
+                        <span class="lang-name">${lang.name}</span>
+                        <span class="lang-native">${lang.native}</span>
+                    </div>
+                    <div class="radio-dot"></div>
+                `;
+                list.appendChild(row);
+            });
+        }
+
+        function updateConnectLabel() {
+            const lang = LANGUAGES.find(l => l.code === selectedLang);
+            document.getElementById('connect-btn').textContent = `Connect to ${lang.name}`;
+        }
+
+        function renderRailList() {
+            const list = document.getElementById('rail-list');
+            list.innerHTML = '';
+            LANGUAGES.forEach(lang => {
+                const row = document.createElement('div');
+                row.className = 'rail-row' + (lang.code === selectedLang ? ' on' : '');
+                row.onclick = () => switchLanguage(lang.code);
+                row.innerHTML = `
+                    <span class="rail-name">${lang.name}</span>
+                    <span class="rail-native">${lang.native}</span>
+                `;
+                list.appendChild(row);
+            });
+        }
+
+        function switchLanguage(code) {
+            if (code === selectedLang || !ws) return;
+            selectedLang = code;
+            latestLineEl = null;
+            lineCount = 0;
+            document.getElementById('transcript-feed').innerHTML = '';
+            ws.close();
+            connectToServer();
+            renderLangList();
+            renderRailList();
+        }
+
+        function renderSizeOptions() {
+            document.querySelectorAll('.size-options').forEach(wrap => {
+                wrap.innerHTML = '';
+                Object.keys(SIZES).forEach(key => {
+                    const btn = document.createElement('div');
+                    btn.className = 'size-btn' + (key === captionSize ? ' on' : '');
+                    btn.textContent = key;
+                    btn.onclick = () => {
+                        captionSize = key;
+                        document.documentElement.style.setProperty('--cap-size', SIZES[key] + 'px');
+                        renderSizeOptions();
+                    };
+                    wrap.appendChild(btn);
+                });
+            });
         }
 
         function connectToServer() {
-            const ip = serverIpInput.value.trim();
-            const selectedLang = langSelect.value;
-            if (!ip) return alert("Please enter a valid server IP address.");
+            const host = window.location.host;
 
-            connectBtn.disabled = true;
-            connectBtn.innerText = "Connecting...";
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            if (!gainNode) {
+                gainNode = audioCtx.createGain();
+                gainNode.gain.value = lastVolume;
+                gainNode.connect(audioCtx.destination);
+            }
 
-            // Dynamically connect to the selected language route
-            ws = new WebSocket(`ws://${ip}:8000/stream/${selectedLang}`);
+            ws = new WebSocket(`ws://${host}/stream/${selectedLang}`);
 
             ws.onopen = () => {
-                statusBadge.className = "flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800";
-                statusBadge.innerHTML = `<span class="h-2 w-2 rounded-full bg-emerald-500 animate-ping"></span> Live`;
-                setupPanel.classList.add('hidden');
-                livePanel.classList.remove('hidden');
-
-                feedTitle.innerText = `${selectedLang === 'uk' ? 'Ukrainian' : 'English'} Audio Feed`;
-                audioPlayer.play().catch(() => { });
+                document.getElementById('status-dot').classList.add('live');
+                document.getElementById('setup-panel').style.display = 'none';
+                document.getElementById('live-panel').style.display = 'flex';
+                document.getElementById('live-panel').style.flexDirection = 'column';
+                const lang = LANGUAGES.find(l => l.code === selectedLang);
+                document.getElementById('status-text').textContent = `Live · ${lang.name}`;
+                document.getElementById('live-lang-label').textContent = `Live · ${lang.name}`;
+                nextStartTime = audioCtx.currentTime;
+                renderRailList();
             };
 
             ws.onmessage = async (event) => {
                 try {
                     const payload = JSON.parse(event.data);
-                    appendTranscriptCard(payload.original, payload.translated, payload.lang);
+                    appendTranscriptLine(payload.translated);
 
                     if (payload.audio) {
                         const audioBlob = base64ToBlob(payload.audio, "audio/wav");
-                        const audioUrl = URL.createObjectURL(audioBlob);
-                        audioQueue.push(audioUrl);
+                        audioQueue.push(URL.createObjectURL(audioBlob));
                         processAudioQueue();
                     }
-                } catch (err) {
-                    console.error("Payload error:", err);
-                }
+                } catch (e) { console.error(e); }
             };
 
             ws.onclose = () => {
-                statusBadge.className = "flex items-center gap-2 px-3 py-1 rounded-full text-xs font-semibold bg-red-100 text-red-800";
-                statusBadge.innerHTML = `<span class="h-2 w-2 rounded-full bg-red-500"></span> Disconnected`;
-                setupPanel.classList.remove('hidden');
-                livePanel.classList.add('hidden');
-                connectBtn.disabled = false;
-                connectBtn.innerText = "Join Audio Stream";
-                transcriptFeed.innerHTML = ""; // Clear logs on disconnect
+                document.getElementById('status-dot').classList.remove('live');
+                document.getElementById('status-text').textContent = 'Ready';
             };
+        }
+
+        function disconnectFromServer() {
+            if (ws) ws.close();
+            document.getElementById('setup-panel').style.display = 'flex';
+            document.getElementById('live-panel').style.display = 'none';
+            document.getElementById('status-dot').classList.remove('live');
+            document.getElementById('status-text').textContent = 'Ready';
+        }
+
+        function toggleMute() {
+            if (!gainNode) return;
+            muted = !muted;
+            const icon = muted ? '&#128263;' : '&#128266;';
+            document.querySelectorAll('.mute-btn').forEach(btn => btn.innerHTML = icon);
+            document.querySelectorAll('.eq').forEach(eq => eq.classList.toggle('playing', !muted));
+            gainNode.gain.value = muted ? 0 : (lastVolume || 0.85);
         }
 
         function processAudioQueue() {
-            if (isPlaying || audioQueue.length === 0) return;
+            if (audioQueue.length === 0) return;
+            const nextUrl = audioQueue.shift();
 
-            isPlaying = true;
-            const nextAudioUrl = audioQueue.shift();
-            audioPlayer.src = nextAudioUrl;
+            fetch(nextUrl)
+                .then(r => r.arrayBuffer())
+                .then(b => audioCtx.decodeAudioData(b))
+                .then(audioBuffer => {
+                    const source = audioCtx.createBufferSource();
+                    source.buffer = audioBuffer;
+                    source.connect(gainNode);
 
-            audioPlayer.play()
-                .then(() => {
-                    eqAnimation.classList.remove('hidden');
-                    eqAnimation.classList.add('flex');
-                    audioStatus.innerText = "Playing translation...";
-                })
-                .catch(e => {
-                    isPlaying = false;
-                    processAudioQueue();
+                    if (nextStartTime < audioCtx.currentTime) nextStartTime = audioCtx.currentTime;
+                    source.start(nextStartTime);
+                    nextStartTime += audioBuffer.duration;
+
+                    source.onended = () => URL.revokeObjectURL(nextUrl);
                 });
-
-            audioPlayer.onended = () => {
-                isPlaying = false;
-                URL.revokeObjectURL(nextAudioUrl);
-                eqAnimation.classList.add('hidden');
-                eqAnimation.classList.remove('flex');
-                audioStatus.innerText = "Listening to stage...";
-                processAudioQueue();
-            };
         }
 
-        function appendTranscriptCard(original, translated, targetLang) {
-            const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-            const card = document.createElement('div');
-            card.className = "bg-white p-4 rounded-xl border border-slate-200 shadow-sm space-y-2 mt-4";
+        function appendTranscriptLine(text) {
+            const feed = document.getElementById('transcript-feed');
 
+            if (latestLineEl) latestLineEl.classList.remove('latest');
+
+            const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const card = document.createElement('div');
+            card.className = 'line latest';
             card.innerHTML = `
-                <div class="flex justify-between items-center text-[10px] font-mono text-slate-400 uppercase">
-                    <span class="font-bold tracking-wider">${targetLang} Engine</span>
-                    <span>${timestamp}</span>
-                </div>
-                <p class="text-sm text-slate-500 font-medium">${original}</p>
-                <p class="text-base text-slate-900 font-semibold border-t border-slate-100 pt-2">${translated}</p>
+                <div class="line-time">${time}</div>
+                <div class="line-text">${escapeHtml(text)}<span class="caret"></span></div>
             `;
-            transcriptFeed.prepend(card);
+            feed.appendChild(card);
+            latestLineEl = card;
+            feed.scrollTop = feed.scrollHeight;
+
+            lineCount++;
+            if (lineCount > 200) {
+                feed.removeChild(feed.firstElementChild);
+            }
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str;
+            return div.innerHTML;
         }
 
         function base64ToBlob(base64Data, contentType) {
@@ -230,14 +993,32 @@
             for (let offset = 0; offset < byteCharacters.length; offset += 512) {
                 const slice = byteCharacters.slice(offset, offset + 512);
                 const byteNumbers = new Array(slice.length);
-                for (let i = 0; i < slice.length; i++) {
-                    byteNumbers[i] = slice.charCodeAt(i);
-                }
-                const byteArray = new Uint8Array(byteNumbers);
-                byteArrays.push(byteArray);
+                for (let i = 0; i < slice.length; i++) byteNumbers[i] = slice.charCodeAt(i);
+                byteArrays.push(new Uint8Array(byteNumbers));
             }
             return new Blob(byteArrays, { type: contentType });
         }
+
+        document.querySelectorAll('.vol-slider').forEach(slider => {
+            slider.addEventListener('input', (e) => {
+                const raw = e.target.value;
+                const v = Number(raw) / 100;
+                document.querySelectorAll('.vol-slider').forEach(s => { if (s !== e.target) s.value = raw; });
+                document.querySelectorAll('.vol-value').forEach(el => el.textContent = raw);
+                if (muted) {
+                    muted = false;
+                    document.querySelectorAll('.mute-btn').forEach(btn => btn.innerHTML = '&#128266;');
+                    document.querySelectorAll('.eq').forEach(eq => eq.classList.add('playing'));
+                }
+                lastVolume = v;
+                if (gainNode) gainNode.gain.value = v;
+            });
+        });
+
+        renderLangList();
+        updateConnectLabel();
+        renderSizeOptions();
+        renderRailList();
     </script>
 </body>
 

@@ -1,0 +1,867 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interpretation Console - Church Translation</title>
+    <style>
+        :root {
+            --accent: #2F6BFF;
+            --ink: 20, 22, 26;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html, body {
+            height: 100%;
+        }
+
+        body {
+            margin: 0;
+            background: #fff;
+            color: rgb(var(--ink));
+            font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+            -webkit-font-smoothing: antialiased;
+            min-height: 100vh;
+        }
+
+        .shell {
+            width: 100%;
+            min-height: 100vh;
+            margin: 0;
+            background: #fff;
+            display: flex;
+            flex-direction: column;
+        }
+
+        @keyframes blink { 0%, 49% { opacity: 1 } 50%, 100% { opacity: 0 } }
+        @keyframes eq { 0%, 100% { transform: scaleY(.22) } 50% { transform: scaleY(1) } }
+        @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .3 } }
+
+        /* header */
+        .console-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 24px 32px;
+            border-bottom: 1px solid rgba(var(--ink), .09);
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+
+        .console-title {
+            display: flex;
+            align-items: baseline;
+            gap: 16px;
+            flex-wrap: wrap;
+        }
+
+        .console-title span:first-child {
+            font: 400 19px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: -.02em;
+        }
+
+        .console-title span:last-child {
+            font: 400 13px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .45);
+        }
+
+        .run-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 99px;
+            background: rgba(var(--ink), .25);
+            flex: none;
+        }
+
+        .dot.on {
+            background: var(--accent);
+            animation: pulse 1.6s ease-in-out infinite;
+        }
+
+        .run-label {
+            font: 500 10.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .14em;
+            text-transform: uppercase;
+            color: rgba(var(--ink), .62);
+        }
+
+        /* listener breakdown */
+        .listeners-bar {
+            display: flex;
+            align-items: center;
+            gap: 36px;
+            padding: 20px 32px;
+            border-bottom: 1px solid rgba(var(--ink), .09);
+            background: #fbfbfc;
+            flex-wrap: wrap;
+        }
+
+        .listeners-label {
+            font: 500 10.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .15em;
+            text-transform: uppercase;
+            color: rgba(var(--ink), .42);
+            flex: none;
+        }
+
+        .listeners-grid {
+            flex: 1;
+            display: grid;
+            grid-template-columns: repeat(2, minmax(120px, 200px));
+            gap: 24px;
+        }
+
+        .listener-row-top {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .listener-row-top span:first-child {
+            font: 400 13px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .5);
+        }
+
+        .listener-count {
+            font: 400 21px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: -.02em;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .more-langs-note {
+            margin-left: auto;
+            font: 400 11.5px/1.4 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .38);
+            max-width: 220px;
+        }
+
+        /* 3-col grid */
+        .controls-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 1px;
+            background: rgba(var(--ink), .09);
+        }
+
+        .control-card {
+            background: #fff;
+            padding: 26px 28px 30px;
+            display: flex;
+            flex-direction: column;
+            gap: 18px;
+        }
+
+        .card-eyebrow {
+            font: 500 10.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .15em;
+            text-transform: uppercase;
+            color: var(--accent);
+        }
+
+        .card-desc {
+            font: 400 13px/1.55 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .5);
+            margin-top: 6px;
+        }
+
+        .opt-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            padding: 14px 16px;
+            border-radius: 11px;
+            cursor: pointer;
+            border: 1px solid rgba(var(--ink), .13);
+            background: #fff;
+        }
+
+        .opt-row.on {
+            border-color: var(--accent);
+            background: color-mix(in srgb, var(--accent) 7%, #fff);
+        }
+
+        .opt-radio {
+            width: 15px;
+            height: 15px;
+            border-radius: 99px;
+            flex: none;
+            background: #fff;
+            border: 1px solid rgba(var(--ink), .24);
+        }
+
+        .opt-row.on .opt-radio {
+            border-color: var(--accent);
+            box-shadow: inset 0 0 0 3.5px var(--accent);
+        }
+
+        .opt-row span.label {
+            font: 400 14.5px/1.2 "Helvetica Neue", Helvetica, sans-serif;
+        }
+
+        .opt-row span.hint {
+            margin-left: auto;
+            font: 400 11px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .38);
+        }
+
+        .opt-list {
+            display: flex;
+            flex-direction: column;
+            gap: 9px;
+        }
+
+        .btn-row {
+            display: flex;
+            gap: 12px;
+        }
+
+        .action-btn {
+            flex: 1;
+            text-align: center;
+            padding: 14px 0;
+            border-radius: 11px;
+            cursor: pointer;
+            font: 400 14.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            border: 1px solid rgba(var(--ink), .15);
+            background: #fff;
+            color: rgba(var(--ink), .55);
+        }
+
+        .action-btn.start.on {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+        }
+
+        .action-btn.stop.on {
+            background: #c2410c;
+            border-color: #c2410c;
+            color: #fff;
+        }
+
+        .elapsed-row {
+            display: flex;
+            align-items: center;
+            gap: 14px;
+        }
+
+        .elapsed-time {
+            font: 400 22px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: -.02em;
+            font-variant-numeric: tabular-nums;
+            color: rgba(var(--ink), .32);
+        }
+
+        .elapsed-time.on {
+            color: rgb(var(--ink));
+        }
+
+        .adm-bars {
+            flex: 1;
+            display: flex;
+            align-items: flex-end;
+            gap: 3px;
+            height: 22px;
+        }
+
+        .adm-bars span {
+            flex: 1;
+            min-width: 2px;
+            border-radius: 2px;
+            background: rgba(var(--ink), .16);
+            transform-origin: bottom;
+        }
+
+        .adm-bars.on span {
+            background: var(--accent);
+        }
+
+        .adm-bars.on span:nth-child(odd) { height: 16px; animation: eq 700ms ease-in-out infinite; }
+        .adm-bars.on span:nth-child(even) { height: 9px; animation: eq 820ms ease-in-out 200ms infinite; }
+
+        .voice-picker {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+
+        .voice-picker-label {
+            font: 400 11px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .42);
+        }
+
+        .voice-trigger {
+            position: relative;
+        }
+
+        .voice-btn {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            padding: 13px 15px;
+            border: 1px solid rgba(var(--ink), .15);
+            border-radius: 10px;
+            background: #f7f8fa;
+            cursor: pointer;
+        }
+
+        .voice-btn-name {
+            font: 400 14px/1.2 "Helvetica Neue", Helvetica, sans-serif;
+        }
+
+        .voice-btn-meta {
+            font: 400 11px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .42);
+            margin-top: 3px;
+        }
+
+        .voice-caret {
+            font: 400 9px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .42);
+        }
+
+        .voice-menu {
+            display: none;
+            position: absolute;
+            top: calc(100% + 6px);
+            left: 0;
+            right: 0;
+            background: #fff;
+            border: 1px solid rgba(var(--ink), .13);
+            border-radius: 10px;
+            overflow: hidden;
+            z-index: 5;
+            box-shadow: 0 20px 44px rgba(20, 22, 26, .18);
+        }
+
+        .voice-menu.open {
+            display: block;
+        }
+
+        .voice-opt {
+            padding: 11px 14px;
+            cursor: pointer;
+        }
+
+        .voice-opt:hover {
+            background: #f7f8fa;
+        }
+
+        .voice-opt-name {
+            font: 400 13.5px/1.2 "Helvetica Neue", Helvetica, sans-serif;
+        }
+
+        .voice-opt-meta {
+            font: 400 10.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .42);
+            margin-top: 3px;
+        }
+
+        /* transcript */
+        .transcript-section {
+            border-top: 1px solid rgba(var(--ink), .09);
+            padding: 28px 32px 34px;
+            background: #fbfbfc;
+        }
+
+        .transcript-header {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            margin-bottom: 18px;
+        }
+
+        .transcript-cols-head {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0 40px;
+            border-bottom: 1px solid rgba(var(--ink), .1);
+            padding-bottom: 10px;
+            font: 500 10.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .13em;
+            color: rgba(var(--ink), .45);
+        }
+
+        #transcript-feed {
+            max-height: 520px;
+            overflow-y: auto;
+        }
+
+        .t-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0 40px;
+            padding: 18px 0;
+            border-bottom: 1px solid rgba(var(--ink), .07);
+        }
+
+        .t-time {
+            font: 400 11px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .06em;
+            color: rgba(var(--ink), .3);
+            margin-bottom: 8px;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .t-src {
+            font: 400 14px/1.5 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .5);
+        }
+
+        .t-tag {
+            font: 500 10px/1 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: .13em;
+            margin-bottom: 8px;
+            color: var(--accent);
+        }
+
+        .t-tgt {
+            font: 400 16.5px/1.45 "Helvetica Neue", Helvetica, sans-serif;
+            letter-spacing: -.01em;
+        }
+
+        .t-empty {
+            text-align: center;
+            padding: 40px 0;
+            color: rgba(var(--ink), .38);
+            font: 400 13px/1.4 "Helvetica Neue", Helvetica, sans-serif;
+        }
+
+        /* notes section */
+        .notes-section {
+            border-top: 1px solid rgba(var(--ink), .09);
+            padding: 26px 32px 30px;
+        }
+
+        .notes-desc {
+            font: 400 12.5px/1.55 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .48);
+            max-width: 640px;
+            margin: 6px 0 16px;
+        }
+
+        .notes-row {
+            display: flex;
+            gap: 12px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .notes-row input[type="file"] {
+            flex: 1;
+            min-width: 200px;
+            font: 400 13px/1 "Helvetica Neue", Helvetica, sans-serif;
+        }
+
+        .notes-btn {
+            padding: 10px 16px;
+            border-radius: 10px;
+            font: 400 13.5px/1 "Helvetica Neue", Helvetica, sans-serif;
+            cursor: pointer;
+            border: 1px solid rgba(var(--ink), .15);
+            background: #fff;
+        }
+
+        .notes-btn.primary {
+            background: var(--accent);
+            border-color: var(--accent);
+            color: #fff;
+        }
+
+        #notes-status {
+            margin-top: 10px;
+            font: 400 12px/1.4 "Helvetica Neue", Helvetica, sans-serif;
+            color: rgba(var(--ink), .45);
+        }
+
+        #notes-status.ok { color: #0E7C66; }
+        #notes-status.err { color: #c2410c; }
+
+        @media (max-width: 900px) {
+            .controls-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="shell">
+        <div class="console-header">
+            <div class="console-title">
+                <span>Interpretation console</span>
+                <span>Church Translation</span>
+            </div>
+            <div class="run-status">
+                <span class="dot" id="run-dot"></span>
+                <span class="run-label" id="run-label">Standby</span>
+            </div>
+        </div>
+
+        <div class="listeners-bar">
+            <span class="listeners-label">Listeners</span>
+            <div class="listeners-grid">
+                <div>
+                    <div class="listener-row-top">
+                        <span>English</span>
+                        <span class="listener-count" id="count-en">0</span>
+                    </div>
+                </div>
+                <div>
+                    <div class="listener-row-top">
+                        <span>Ukrainian</span>
+                        <span class="listener-count" id="count-uk">0</span>
+                    </div>
+                </div>
+            </div>
+            <p class="more-langs-note">2 languages supported right now &mdash; more planned</p>
+        </div>
+
+        <div class="controls-grid">
+            <!-- 01 source language -->
+            <div class="control-card">
+                <div>
+                    <div class="card-eyebrow">01 &middot; Source language</div>
+                    <div class="card-desc">Lock what the speaker is using to stop mid-sentence switching.</div>
+                </div>
+                <div class="opt-list" id="source-opts"></div>
+            </div>
+
+            <!-- 02 translation feed -->
+            <div class="control-card">
+                <div>
+                    <div class="card-eyebrow">02 &middot; Translation feed</div>
+                    <div class="card-desc">Starts capture, transcription and outbound audio for every listener.</div>
+                </div>
+                <div class="btn-row">
+                    <div class="action-btn start" id="btn-start-capture" onclick="setCaptureState(true)">Start</div>
+                    <div class="action-btn stop" id="btn-stop-capture" onclick="setCaptureState(false)">Stop</div>
+                </div>
+                <div class="elapsed-row">
+                    <span class="elapsed-time" id="elapsed-time">00:00</span>
+                    <div class="adm-bars" id="adm-bars">
+                        <span></span><span></span><span></span><span></span><span></span><span></span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 03 voice model -->
+            <div class="control-card">
+                <div>
+                    <div class="card-eyebrow">03 &middot; Voice model</div>
+                    <div class="card-desc">Swap the synthesised voice without interrupting the feed.</div>
+                </div>
+                <div class="voice-picker">
+                    <span class="voice-picker-label">English voice</span>
+                    <div class="voice-trigger" id="voice-trigger-en"></div>
+                </div>
+                <div class="voice-picker">
+                    <span class="voice-picker-label">Ukrainian voice</span>
+                    <div class="voice-trigger" id="voice-trigger-uk"></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 04 transcript -->
+        <div class="transcript-section">
+            <div class="transcript-header">
+                <div class="card-eyebrow">04 &middot; Transcript</div>
+                <span style="font:400 12px/1 'Helvetica Neue',Helvetica,sans-serif;color:rgba(20,22,26,.38)">Original left, translation right</span>
+            </div>
+            <div class="transcript-cols-head">
+                <span>ORIGINAL</span>
+                <span>TRANSLATION</span>
+            </div>
+            <div id="transcript-feed">
+                <div class="t-empty">Awaiting stage microphone input&hellip;</div>
+            </div>
+        </div>
+
+        <!-- sermon notes -->
+        <div class="notes-section">
+            <div class="card-eyebrow">Sermon notes (accuracy boost)</div>
+            <p class="notes-desc">Upload a plain .txt file of this week's notes/outline. Names, scripture
+                references, and unusual terms get extracted and fed to the transcription and translation engines.</p>
+            <div class="notes-row">
+                <input type="file" id="notes-file-input" accept=".txt">
+                <div class="notes-btn primary" onclick="uploadNotes()">Upload</div>
+                <div class="notes-btn" onclick="clearNotes()">Clear</div>
+            </div>
+            <div id="notes-status"></div>
+        </div>
+    </div>
+
+    <script>
+        let ws;
+        let currentSourceLang = 'auto';
+        let isCapturing = false;
+        let elapsedSecs = 0;
+        let elapsedTimer = null;
+        let voiceState = { en: { options: [], current: null }, uk: { options: [], current: null } };
+        let openVoiceMenu = null;
+
+        const SOURCE_OPTIONS = [
+            { id: 'auto', label: 'Auto-detect', hint: 'model decides' },
+            { id: 'uk', label: 'Ukrainian', hint: 'locked' },
+            { id: 'en', label: 'English', hint: 'locked' },
+        ];
+
+        function renderSourceOptions() {
+            const wrap = document.getElementById('source-opts');
+            wrap.innerHTML = '';
+            SOURCE_OPTIONS.forEach(opt => {
+                const on = opt.id === currentSourceLang;
+                const row = document.createElement('div');
+                row.className = 'opt-row' + (on ? ' on' : '');
+                row.onclick = () => setSourceLanguage(opt.id);
+                row.innerHTML = `
+                    <div class="opt-radio"></div>
+                    <span class="label">${opt.label}</span>
+                    <span class="hint">${on ? opt.hint : ''}</span>
+                `;
+                wrap.appendChild(row);
+            });
+        }
+
+        function setSourceLanguage(lang) {
+            fetch(`/admin/set_language/${lang}`, { method: 'POST' })
+                .then(res => res.json())
+                .then(() => {
+                    currentSourceLang = lang;
+                    renderSourceOptions();
+                })
+                .catch(err => console.error("Error setting language:", err));
+        }
+
+        function setCaptureState(state) {
+            fetch(`/admin/set_capture/${state}`, { method: 'POST' })
+                .then(res => res.json())
+                .then(data => {
+                    isCapturing = data.is_capturing;
+                    document.getElementById('btn-start-capture').classList.toggle('on', isCapturing);
+                    document.getElementById('btn-stop-capture').classList.toggle('on', !isCapturing);
+                    document.getElementById('run-dot').classList.toggle('on', isCapturing);
+                    document.getElementById('run-label').textContent = isCapturing ? 'Translating' : 'Standby';
+                    document.getElementById('adm-bars').classList.toggle('on', isCapturing);
+                    document.getElementById('elapsed-time').classList.toggle('on', isCapturing);
+                    toggleElapsedTimer(isCapturing);
+                })
+                .catch(err => console.error("Error setting capture state:", err));
+        }
+
+        function toggleElapsedTimer(running) {
+            if (running) {
+                elapsedSecs = 0;
+                updateElapsedDisplay();
+                elapsedTimer = setInterval(() => {
+                    elapsedSecs++;
+                    updateElapsedDisplay();
+                }, 1000);
+            } else if (elapsedTimer) {
+                clearInterval(elapsedTimer);
+                elapsedTimer = null;
+            }
+        }
+
+        function updateElapsedDisplay() {
+            const mm = String(Math.floor(elapsedSecs / 60)).padStart(2, '0');
+            const ss = String(elapsedSecs % 60).padStart(2, '0');
+            document.getElementById('elapsed-time').textContent = `${mm}:${ss}`;
+        }
+
+        function connectAdminSocket() {
+            const host = window.location.host;
+            ws = new WebSocket(`ws://${host}/ws/admin`);
+
+            ws.onopen = () => {
+                document.getElementById('run-dot').classList.toggle('on', isCapturing);
+            };
+
+            ws.onmessage = (event) => {
+                const data = JSON.parse(event.data);
+                if (data.type === "transcript") {
+                    const feed = document.getElementById('transcript-feed');
+                    if (feed.querySelector('.t-empty')) feed.innerHTML = '';
+
+                    const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+                    const row = document.createElement('div');
+                    row.className = 't-row';
+                    row.innerHTML = `
+                        <div>
+                            <div class="t-time">${time}</div>
+                            <div class="t-src">${escapeHtml(data.original)}</div>
+                        </div>
+                        <div>
+                            <div class="t-tag">&rarr; ${escapeHtml((data.lang || '').toUpperCase())}</div>
+                            <div class="t-tgt">${escapeHtml(data.translated)}</div>
+                        </div>
+                    `;
+                    feed.prepend(row);
+                }
+            };
+
+            ws.onclose = () => {
+                setTimeout(connectAdminSocket, 2000);
+            };
+
+            ws.onerror = () => {
+                ws.close();
+            };
+        }
+
+        function escapeHtml(str) {
+            const div = document.createElement('div');
+            div.textContent = str || '';
+            return div.innerHTML;
+        }
+
+        function loadVoices() {
+            fetch('/admin/voices')
+                .then(res => res.json())
+                .then(data => {
+                    ['en', 'uk'].forEach(lang => {
+                        voiceState[lang].options = data.options[lang] || [];
+                        voiceState[lang].current = data.current[lang];
+                    });
+                    renderVoiceTriggers();
+                })
+                .catch(err => console.error("Error loading voices:", err));
+        }
+
+        function renderVoiceTriggers() {
+            ['en', 'uk'].forEach(lang => {
+                const trigger = document.getElementById(`voice-trigger-${lang}`);
+                const state = voiceState[lang];
+                const current = state.options.find(v => v.id === state.current);
+                trigger.innerHTML = '';
+
+                const btn = document.createElement('div');
+                btn.className = 'voice-btn';
+                btn.onclick = () => {
+                    openVoiceMenu = openVoiceMenu === lang ? null : lang;
+                    renderVoiceTriggers();
+                };
+                btn.innerHTML = `
+                    <div>
+                        <div class="voice-btn-name">${current ? escapeHtml(current.name) : 'No voice available'}</div>
+                        <div class="voice-btn-meta">${current ? 'id: ' + escapeHtml(current.id.slice(0, 10)) + '…' : ''}</div>
+                    </div>
+                    <span class="voice-caret">${openVoiceMenu === lang ? '▲' : '▼'}</span>
+                `;
+                trigger.appendChild(btn);
+
+                const menu = document.createElement('div');
+                menu.className = 'voice-menu' + (openVoiceMenu === lang ? ' open' : '');
+                state.options.forEach(voice => {
+                    const opt = document.createElement('div');
+                    opt.className = 'voice-opt';
+                    opt.onclick = (e) => {
+                        e.stopPropagation();
+                        setVoice(lang, voice.id);
+                    };
+                    opt.innerHTML = `
+                        <div class="voice-opt-name">${escapeHtml(voice.name)}</div>
+                        <div class="voice-opt-meta">id: ${escapeHtml(voice.id.slice(0, 14))}&hellip;</div>
+                    `;
+                    menu.appendChild(opt);
+                });
+                trigger.appendChild(menu);
+            });
+        }
+
+        function setVoice(lang, voiceId) {
+            fetch(`/admin/set_voice/${lang}/${voiceId}`, { method: 'POST' })
+                .then(res => res.json())
+                .then(() => {
+                    voiceState[lang].current = voiceId;
+                    openVoiceMenu = null;
+                    renderVoiceTriggers();
+                })
+                .catch(err => console.error("Error setting voice:", err));
+        }
+
+        function uploadNotes() {
+            const input = document.getElementById('notes-file-input');
+            const statusEl = document.getElementById('notes-status');
+            if (!input.files.length) {
+                statusEl.textContent = "Choose a .txt file first.";
+                statusEl.className = "err";
+                return;
+            }
+
+            const formData = new FormData();
+            formData.append('file', input.files[0]);
+
+            statusEl.textContent = "Extracting glossary...";
+            statusEl.className = "";
+
+            fetch('/admin/upload_notes', { method: 'POST', body: formData })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        statusEl.textContent = data.glossary ? `Glossary loaded: ${data.glossary}` : "Notes uploaded, but no terms were extracted.";
+                        statusEl.className = "ok";
+                    } else {
+                        statusEl.textContent = data.message || "Upload failed.";
+                        statusEl.className = "err";
+                    }
+                })
+                .catch(err => {
+                    console.error("Error uploading notes:", err);
+                    statusEl.textContent = "Upload failed.";
+                    statusEl.className = "err";
+                });
+        }
+
+        function clearNotes() {
+            fetch('/admin/clear_notes', { method: 'POST' })
+                .then(res => res.json())
+                .then(() => {
+                    document.getElementById('notes-file-input').value = "";
+                    const statusEl = document.getElementById('notes-status');
+                    statusEl.textContent = "Glossary cleared.";
+                    statusEl.className = "";
+                })
+                .catch(err => console.error("Error clearing notes:", err));
+        }
+
+        function loadNotesStatus() {
+            fetch('/admin/notes_status')
+                .then(res => res.json())
+                .then(data => {
+                    if (data.glossary) {
+                        const statusEl = document.getElementById('notes-status');
+                        statusEl.textContent = `Glossary loaded: ${data.glossary}`;
+                        statusEl.className = "ok";
+                    }
+                })
+                .catch(err => console.error("Error loading notes status:", err));
+        }
+
+        document.addEventListener('click', (e) => {
+            if (openVoiceMenu && !e.target.closest('.voice-trigger')) {
+                openVoiceMenu = null;
+                renderVoiceTriggers();
+            }
+        });
+
+        renderSourceOptions();
+        connectAdminSocket();
+        loadVoices();
+        loadNotesStatus();
+    </script>
+</body>
+
+</html>

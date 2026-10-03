@@ -1,0 +1,16 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+ai_env/
+
+# Generated audio
+output_*.wav
+
+# macOS
+.DS_Store
+
+# Local reference audio (not needed in repo)
+pastor_reference.wav

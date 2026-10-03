@@ -2,45 +2,92 @@ from fastapi.responses import HTMLResponse
 import sounddevice as sd    
 import numpy as np      
 from TTS.api import TTS     
-from faster_whisper import WhisperModel 
+import mlx_whisper  
 import requests     
-from fastapi import FastAPI, WebSocket  
+from fastapi import FastAPI, WebSocket, File, UploadFile
 import uvicorn      
-import asyncio      
-import threading    
-import base64  # NEW: Used to encode audio into a text-safe format
-import os      # NEW: Used to clean up temporary audio files
+import asyncio
+import threading
+import queue
+import concurrent.futures
+import base64  
+import os
+import re
+import time
+from dotenv import load_dotenv
+
+# API keys live in .env (not committed to git). See .env.example.
+load_dotenv()
+FISH_AUDIO_API_KEY = os.getenv("FISH_AUDIO_API_KEY")
+if not FISH_AUDIO_API_KEY:
+    print("WARNING: FISH_AUDIO_API_KEY is not set. Copy .env.example to .env and add your key.")
+
+audio_queue = queue.Queue()
 
 app = FastAPI()
 
-# seperate guest lists for eng and ukr
+# Runs translate+TTS+broadcast for each phrase off the main capture thread,
+# one at a time (max_workers=1 keeps phrases broadcast in the order spoken)
+# so the mic keeps recording the next phrase instead of waiting on this one.
+translation_executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="translator")
+
+# separate guest lists for eng and ukr
 clients = {
     "uk": set(),
     "en": set()
 }
 
-current_source_lang = "auto"
+admin_clients = set()
 
-print("Loading Whisper Model into VRAM...")
-whisper_model = WhisperModel("large-v3", device="cuda", compute_type="int8_float16")
+current_source_lang = "uk"
 
-print("Loading Ukrainian TTS Model...")
-tts_uk = TTS("tts_models/uk/mai/vits").to("cuda")
+# Fish Audio voice options, keyed by broadcast language. Add more
+# {"name": ..., "id": ...} entries here as you get more voice IDs.
+VOICE_OPTIONS = {
+    "uk": [
+        {"name": "Default Ukrainian", "id": "fa45fe6682a341edb0c85390c7fe2834"},
+    ],
+    "en": [
+        {"name": "Adrian", "id": "bf322df2096a46f18c579d0baa36f41d"},
+        {"name": "Default English", "id": "da2053129ddc47e5b97fa33b1ddbcef9"},
+    ],
+}
 
-print("Loading English TTS Model...")
-tts_en = TTS("tts_models/multilingual/multi-dataset/xtts_v2").to("cuda")
+current_voice_id = {
+    "uk": VOICE_OPTIONS["uk"][0]["id"],
+    "en": VOICE_OPTIONS["en"][0]["id"],
+}
+
+# master flag for controling audio
+is_capturing = False
+
+# Comma-separated glossary of proper nouns, scripture references, and unusual
+# vocabulary extracted from uploaded sermon notes. Fed into both Whisper's
+# initial_prompt and the translation prompt so names/terms stay consistent.
+sermon_glossary = ""
 
 # === config ===
 SAMPLE_RATE = 48000
-CHUNK_DURATION = 3 
+CHUNK_DURATION = 3
+
+# Which Dante input channels to capture, 1-indexed as labeled in Dante Controller
+# (e.g. [1, 2] for channels 1 & 2, [5] for just channel 5, [3, 4] for 3 & 4).
+DANTE_CHANNELS = [63, 64]
 
 # function to locate the dante device id
 def get_dante_id():
     devices = sd.query_devices()
     for idx, dev in enumerate(devices):
-        if "DVS Recieve" in dev['name'] and "1-2" in dev['name'] and dev['max_input_channels'] > 0:
+        name = dev['name'].lower()
+        if "dante" in name and dev['max_input_channels'] > 0:
+            print(f"Success! Found Dante stream at ID #{idx} ({dev['name']})")
             return idx
-    return 90
+            
+    print("\nWARNING: Auto-search failed. Forcing connection to Device ID 1.")
+    return 1 # Hardcoded to your Dante Virtual Soundcard
+            
+    print("\nCRITICAL WARNING: Could not find PythonDante!")
+    return 0
 
 DANTE_INPUT_ID = get_dante_id()
 
@@ -79,128 +126,478 @@ async def websocket_endpoint(websocket: WebSocket, language: str):
             clients[language].remove(websocket) 
             print(f"Client disconnected from {language.upper()}. Total listeners: {len(clients[language])}")
 
-# FIXED: Broadcasts a unified JSON package containing both text and audio
+# Serve the Admin Dashboard Page
+@app.get("/admin", response_class=HTMLResponse)
+async def get_admin_dashboard():
+    with open("admin.html", "r", encoding="utf-8") as f:
+        return f.read()
+
+# WebSocket specifically for the Tech Booth Admin Dashboard
+@app.websocket("/ws/admin")
+async def admin_websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    admin_clients.add(websocket)
+    try:
+        while True:
+            await websocket.receive_text()
+    except Exception:
+        pass
+    finally:
+        admin_clients.remove(websocket)
+
+# logic for start/stop button
+@app.post("/admin/set_capture/{state}")
+async def set_capture_state(state: bool):
+    global is_capturing
+    is_capturing = state
+    status_str = "STARTED" if is_capturing else "PAUSED"
+    print(f"\n[ADMIN] Sermon Audio Capture: {status_str}")
+
+    # empty out queue when paused so worship audio doesn't stack up
+    if not is_capturing:
+        with audio_queue.mutex:
+            audio_queue.queue.clear()
+
+    return {"status": "success", "is_capturing": is_capturing}
+
+# Accepts uploaded sermon notes (plain text), extracts a glossary of proper
+# nouns/scripture references/unusual vocabulary via the local LLM, and stores
+# it for use as transcription/translation context during the service.
+@app.post("/admin/upload_notes")
+async def upload_notes(file: UploadFile = File(...)):
+    global sermon_glossary
+
+    raw_bytes = await file.read()
+    try:
+        notes_text = raw_bytes.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return {"status": "error", "message": "Could not read file as text. Please upload a plain .txt file."}
+
+    if not notes_text:
+        return {"status": "error", "message": "Uploaded file is empty."}
+
+    try:
+        response = requests.post('http://localhost:11434/api/generate', json={
+            "model": "llama3:8b",
+            "system": "You extract a short glossary from sermon notes for a live speech transcription and translation system. List only proper nouns, names, unusual vocabulary, and scripture references that a transcription engine might mishear or a translator might render inconsistently. Output ONLY a comma-separated list, nothing else, no more than 40 items.",
+            "prompt": notes_text[:6000],
+            "stream": False
+        })
+        sermon_glossary = response.json()['response'].strip()
+    except Exception as e:
+        return {"status": "error", "message": f"Failed to extract glossary: {e}"}
+
+    print(f"\n[ADMIN] Sermon notes uploaded. Extracted glossary: {sermon_glossary}")
+    return {"status": "success", "glossary": sermon_glossary}
+
+# Clears the stored glossary, e.g. between services
+@app.post("/admin/clear_notes")
+async def clear_notes():
+    global sermon_glossary
+    sermon_glossary = ""
+    print("\n[ADMIN] Sermon notes glossary cleared")
+    return {"status": "success"}
+
+# Lets the admin dashboard show what glossary is currently active
+@app.get("/admin/notes_status")
+async def notes_status():
+    return {"glossary": sermon_glossary}
+
+# Lists available Fish Audio voices so the admin dashboard can populate its dropdowns
+@app.get("/admin/voices")
+async def get_voices():
+    return {"options": VOICE_OPTIONS, "current": current_voice_id}
+
+# Sets which Fish Audio voice ID to use for a given broadcast language
+@app.post("/admin/set_voice/{lang}/{voice_id}")
+async def set_voice(lang: str, voice_id: str):
+    global current_voice_id
+    if lang not in VOICE_OPTIONS:
+        return {"status": "error"}
+    if not any(v["id"] == voice_id for v in VOICE_OPTIONS[lang]):
+        return {"status": "error"}
+    current_voice_id[lang] = voice_id
+    print(f"\n[ADMIN] {lang.upper()} voice set to: {voice_id}")
+    return {"status": "success", "lang": lang, "voice_id": voice_id}
+
+
+# Update broadcast_payload to also notify the admin dashboard
 async def broadcast_payload(payload: dict, target_language: str):
+    # Send to active listeners
     for client in clients[target_language]: 
         try:
             await client.send_json(payload) 
         except:
             pass 
+            
+    # Send to Tech Booth Admin Dashboard
+    admin_data = {
+        "type": "transcript",
+        "original": payload["original"],
+        "translated": payload["translated"],
+        "lang": payload["lang"]
+    }
+    for admin in admin_clients:
+        try:
+            await admin.send_json(admin_data)
+        except:
+            pass
 
-def process_audio(indata):
-    # format the audio for Whisper
-    audio_data = indata.flatten().astype(np.float32)
+# NEW: The lightweight callback that just fills the bucket
+def audio_callback(indata, frames, time, status):
+    if status:
+        pass
+    # indata has one column per opened channel (1..N); pull out just the
+    # Dante channels we actually want (0-indexed into the opened block).
+    selected = indata[:, [ch - 1 for ch in DANTE_CHANNELS]]
+    audio_queue.put(selected.copy())
 
-    # downsample from 48kHz to 16kHz for Whisper
-    audio_16k = audio_data[::3]
+# NEW: The background worker that waits for 3 seconds of audio, then translates
+def transcription_worker():
+    global is_capturing
 
-    if current_source_lang == "auto":
-        segments, info = whisper_model.transcribe(audio_16k, vad_filter=True)
-    else:
-        # Force Whisper to strictly listen in the locked language
-        segments, info = whisper_model.transcribe(audio_16k, vad_filter=True, language=current_source_lang)
+    # Smart VAD Thresholds
+    SILENCE_THRESHOLD = 0.015
+    PAUSE_CHUNKS = 70 # trying a longer pause treshold
+    MIN_CHUNKS = 12 # ~1.0 second minimum audio length
+    MAX_CHUNKS = 140 # ~12 seconds maximum audio length (force cut)
 
-    # DEFENSE 1: Turn on VAD (Voice Activity Detection)
-    # This forces Whisper to completely ignore chunks of audio that don't contain actual human speech
-    detected_lang = info.language
-    spoken_text = "".join([segment.text for segment in segments]).strip()
+    # Smart Punctuation Trigger: a chunk that doesn't end in terminal
+    # punctuation is likely a mid-sentence VAD cut. Hold it here and merge
+    # it with the next transcribed chunk instead of translating a fragment.
+    SENTENCE_ENDINGS = (".", "!", "?", "…")
+    CLOSING_CHARS = "\"'”’)]»" # trailing quotes/brackets, e.g. closing a scripture quote
+    HOLD_LIMIT = 2 # force-flush after this many stalled attempts so a phrase can't hang forever
+    HALLUCINATIONS = ["thank you", "thanks for watching", "i'll call you my friend", "so it's a little later", "дякую", "you", "Let us open in prayer.", "Let us pray.", "the word of God", "word of god",
+                      "Welcome, everyone.", "Today we will look closely at the Word of God.",
+                      "Ласкаво просимо.", "Сьогодні ми уважно розглянемо Слово Боже.", "Слово Боже", "Помолімося разом."]
 
-    # DEFENSE 2: The Strict Language Lock
-    # If Whisper somehow still guesses a random language, we silently kill the process right here
-    if detected_lang not in ["en", "uk"]:
-        return
+    # Whisper mimics the punctuation/formatting style of whatever text it's
+    # given as context, so priming it with a fully-punctuated example nudges
+    # it to keep ending sentences with "." "!" "?" instead of dropping them.
+    # Keep these free of sermon-sounding phrases: Whisper echoes its prompt
+    # back as a hallucination during pauses (that's where "the Word of God" came from).
+    initial_prompts = {
+        "en": "Okay, so. Now, as I was saying, let's go on.",
+        "uk": "Отже, так. Тепер, як я вже казав, продовжимо.",
+    }
 
-    # Block empty text and common Whisper hallucinations
-    hallucinations = ["thank you", "thanks for watching", "i'll call you my friend", "so it's a little later", "дякую"]
-    if not spoken_text or any(h in spoken_text.lower() for h in hallucinations):
-        return
-    
-    print(f"\n[Detected: {detected_lang.upper()}] {spoken_text}")
+    def normalize(text):
+        return re.sub(r"[^\w\s']", "", text.lower()).strip()
 
+    # Hallucinated sentences are matched whole (not as substrings) so real
+    # speech like "your" or "we read the word of God daily" isn't thrown away.
+    # Prompt sentences are included too, since Whisper can echo them verbatim.
+    hallucination_set = {normalize(h) for h in HALLUCINATIONS}
+    for prompt in initial_prompts.values():
+        hallucination_set.update(normalize(s) for s in re.split(r"(?<=[.!?…])\s+", prompt))
+    hallucination_set.discard("")
+
+    # Drops hallucinated sentences from anywhere in the transcription (start,
+    # middle, or end) and keeps the real speech around them
+    def strip_hallucinations(result):
+        kept = []
+        for segment in result.get("segments", []):
+            for sentence in re.split(r"(?<=[.!?…])\s+", segment["text"].strip()):
+                cleaned = normalize(sentence)
+                if not cleaned:
+                    continue
+                if cleaned in hallucination_set or cleaned.startswith("todays terms"):
+                    print(f"[Dropped hallucination] {sentence}")
+                    continue
+                kept.append(sentence)
+        return " ".join(kept).strip()
+
+    def ends_sentence(text):
+        return text.rstrip(CLOSING_CHARS).endswith(SENTENCE_ENDINGS)
+
+    pending_text = ""
+    pending_lang = None
+    pending_holds = 0
+
+    while True:
+        # if capture paused, clear queue and sleeo
+        if not is_capturing:
+            with audio_queue.mutex:
+                audio_queue.queue.clear()
+            pending_text = ""
+            pending_lang = None
+            pending_holds = 0
+            time.sleep(0.5)
+            continue
+        
+        accumulated_audio = []
+        silence_counter = 0
+
+        # dynamic gathering loop
+        while True:
+            if not is_capturing:
+                break
+
+            try:
+                data = audio_queue.get(timeout=0.5)
+                accumulated_audio.append(data)
+
+                # check volume of tiny audio slice
+                if data.shape[1] > 1:
+                    chunk_volume = np.max(np.abs(np.mean(data, axis=1)))
+                else:
+                    chunk_volume = np.max(np.abs(data.flatten()))
+                
+                # If it's quiet, count up the silence. If he speaks, reset the counter!
+                if chunk_volume < SILENCE_THRESHOLD:
+                    silence_counter += 1
+                else:
+                    silence_counter = 0 
+
+                total_chunks = len(accumulated_audio)
+
+                # trigger 1: preacher took a breath (silence) and spoke long enough
+                if silence_counter >= PAUSE_CHUNKS and total_chunks >= MIN_CHUNKS:
+                    break
+
+                # trigger 2: preacher has not taken a breath in 12 seconds (force cut)
+                if total_chunks >= MAX_CHUNKS:
+                    break
+
+            except queue.Empty:
+                continue
+
+            # prevent processing if paused mid-sentance or if bucket is empty
+            if not is_capturing or not accumulated_audio:
+                continue
+
+        # 2. Stitch chunks together
+        indata = np.concatenate(accumulated_audio, axis=0)
+
+        # 3. Mix stereo to mono
+        if indata.shape[1] > 1:
+            audio_data = np.mean(indata, axis=1).astype(np.float32)
+        else:
+            audio_data = indata.flatten().astype(np.float32)
+
+        # 4. The Sanity Check
+        max_volume = np.max(np.abs(audio_data))
+        print(f"Volume: {max_volume:.4f}")
+
+        # If it's pure silence, skip it and wait for the next bucket
+        if max_volume < 0.001:
+            continue
+
+        # downsample from 48kHz to 16kHz for Whisper
+        audio_16k = audio_data[::3]
+
+        mlx_model_repo = "mlx-community/whisper-large-v3-mlx"
+
+        # Prime Whisper with today's proper nouns/scripture references so it
+        # doesn't have to guess unfamiliar words purely from audio
+        whisper_prompt = initial_prompts.get(current_source_lang)
+        if sermon_glossary and whisper_prompt:
+            whisper_prompt = f"{whisper_prompt} Today's terms: {sermon_glossary}"
+
+        try:
+            if current_source_lang == "auto":
+                result = mlx_whisper.transcribe(
+                    audio_16k,
+                    path_or_hf_repo=mlx_model_repo,
+                    word_timestamps=True,
+                    hallucination_silence_threshold=1.0
+                )
+            else:
+                # word_timestamps + hallucination_silence_threshold let Whisper
+                # skip text it invents inside silent gaps (>1s) mid-chunk,
+                # which is where mid-phrase hallucinations come from
+                result = mlx_whisper.transcribe(
+                    audio_16k,
+                    path_or_hf_repo=mlx_model_repo,
+                    language=current_source_lang,
+                    initial_prompt=whisper_prompt,
+                    word_timestamps=True,
+                    hallucination_silence_threshold=1.0
+                )
+
+            detected_lang = result.get("language", "unknown")
+            spoken_text = strip_hallucinations(result)
+            
+        except Exception as e:
+            print(f"MLX Transcription Error: {e}")
+            # can't safely flush pending text without a replacement chunk to attach it to
+            if pending_text:
+                pending_holds += 1
+            continue
+
+        # The Diagnostic Print
+        # We removed the print statement here so it stops spamming every guess
+
+        # A chunk is "noise" if it's the wrong language or nothing is left
+        # after strip_hallucinations removed the known Whisper hallucinations
+        is_noise = (
+            detected_lang not in ["en", "uk"]
+            or not spoken_text
+        )
+
+        if is_noise:
+            # a noise chunk still counts as a stalled attempt, so a held
+            # fragment eventually gets flushed instead of waiting forever
+            # for a "real" chunk that never merges with it
+            if pending_text and pending_holds >= HOLD_LIMIT:
+                spoken_text = pending_text
+                detected_lang = pending_lang
+                pending_text = ""
+                pending_lang = None
+                pending_holds = 0
+            else:
+                if pending_text:
+                    pending_holds += 1
+                continue
+        else:
+            # Merge with anything held back from a previous fragment
+            if pending_text:
+                spoken_text = f"{pending_text} {spoken_text}".strip()
+
+            # If this doesn't look like the end of a sentence, hold it and
+            # wait for the next chunk instead of cutting the phrase off mid-thought
+            if not ends_sentence(spoken_text) and pending_holds < HOLD_LIMIT:
+                pending_text = spoken_text
+                pending_lang = detected_lang
+                pending_holds += 1
+                print(f"\n[Holding, no terminal punctuation] {spoken_text}")
+                continue
+
+            pending_text = ""
+            pending_lang = None
+            pending_holds = 0
+
+        print(f"\n[Detected: {detected_lang.upper()}] {spoken_text}")
+
+        # Nudge the translation model to keep sermon-specific terms consistent
+        glossary_line = f"Glossary of today's sermon terms (keep these spellings/names consistent): {sermon_glossary}. " if sermon_glossary else ""
+
+        # Hand this phrase off to the translator thread and immediately go
+        # back to listening for the next one instead of blocking on it here
+        translation_executor.submit(translate_and_broadcast, spoken_text, detected_lang, glossary_line)
+
+
+# Translates one already-transcribed phrase, synthesizes TTS audio, and
+# broadcasts it. Runs on translation_executor so it never blocks the mic
+# capture loop in transcription_worker.
+def translate_and_broadcast(spoken_text, detected_lang, glossary_line):
     thread_id = threading.get_ident()
     temp_filename = f"output_{thread_id}.wav"
 
     try:
-        # PATH A: Pastor speaks English -> Translate to Ukrainian
-        if detected_lang == "en" and len(clients["uk"]) > 0:
-            response = requests.post('http://localhost:11434/api/generate', json={
-                "model": "llama3:8b",
-                "prompt": f"Translate this English church sermon phrase to natural Ukrainian. Only return the Ukrainian text: {spoken_text}",
-                "stream": False
-            })
-            translated_text = response.json()['response'].strip()
-            
-            tts_uk.tts_to_file(text=translated_text, file_path=temp_filename)
+            # PATH A: Pastor speaks English -> Translate to Ukrainian
+            if detected_lang == "en" and len(clients["uk"]) > 0:
+                response = requests.post('http://localhost:11434/api/generate', json={
+                    "model": "llama3:8b",
+                    "system": "You are a raw translation machine. You must output ONLY the direct translation. Never include notes, explanations, introductions, or conversational filler.",
+                    "prompt": f"{glossary_line}Translate this English church sermon phrase to natural Ukrainian: {spoken_text}",
+                    "stream": False
+                })
+                translated_text = response.json()['response'].strip()
+                
+                # The Python Guillotine
+                translated_text = translated_text.split("Note:")[0].split("Notes:")[0].split("Примітка:")[0].strip()
+                
+                # The Anti-Moan Punctuation Lock
+                if not translated_text.endswith((".", "!", "?")):
+                    translated_text += "."
+                
+                # NEW: Fish Audio API Call for Ukrainian
+                fish_response = requests.post(
+                    "https://api.fish.audio/v1/tts",
+                    headers={
+                        "Authorization": f"Bearer {FISH_AUDIO_API_KEY}",
+                        "Content-Type": "application/json",
+                        "model": "s2.1-pro-free" # Use "s2.1-pro" for the paid production tier
+                    },
+                    json={
+                        "text": translated_text,
+                        "reference_id": current_voice_id["uk"],
+                        "format": "wav"
+                    }
+                )
+                
+                if fish_response.status_code == 200:
+                    # Encode directly to base64 to bypass the hard drive
+                    audio_base64 = base64.b64encode(fish_response.content).decode('utf-8')
+                    
+                    payload = {"original": spoken_text, "translated": translated_text, "audio": audio_base64, "lang": "Ukrainian"}
+                    asyncio.run_coroutine_threadsafe(broadcast_payload(payload, "uk"), server_loop)
+                else:
+                    print(f"Fish Audio Error (UK): {fish_response.text}")
 
-            with open(temp_filename, "rb") as f:
-                audio_base64 = base64.b64encode(f.read()).decode('utf-8')
-            
-            payload = {"original": spoken_text, "translated": translated_text, "audio": audio_base64, "lang": "Ukrainian"}
-            asyncio.run_coroutine_threadsafe(broadcast_payload(payload, "uk"), server_loop)
-
-        # PATH B: Pastor speaks Ukrainian -> Translate to English
-        elif detected_lang == "uk" and len(clients["en"]) > 0:
-            response = requests.post('http://localhost:11434/api/generate', json={
-                "model": "llama3:8b",
-                "prompt": f"Translate this Ukrainian church sermon phrase to natural English. Do not include any introductory remarks, quotes, or conversational text. Only return the direct English translation: {spoken_text}",
-                "stream": False
-            })
-            translated_text = response.json()['response'].strip()
-            
-            # Remove any stray markdown or quotes that make XTTS panic
-            translated_text = translated_text.replace('"', '').replace("'", "").replace("*", "").strip()
-            
-            # FIXED: Avoid XTTS short-phrase melting. If it's less than 3 words, 
-            # don't force a voice clone; drop it or use a threshold.
-            if len(translated_text.split()) < 3:
-                print(f"Skipping English TTS for short phrase to avoid distortion: {translated_text}")
-                return
-            
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            absolute_speaker_path = os.path.join(base_dir, "pastor_reference.wav")
-            
-            # FIXED: Added speed parameter (1.05) to prevent the audio from dragging or echoing
-            tts_en.tts_to_file(
-                text=translated_text, 
-                speaker_wav=absolute_speaker_path, 
-                language="en", 
-                file_path=temp_filename,
-                speed=1.05 
-            )
-
-            with open(temp_filename, "rb") as f:
-                audio_base64 = base64.b64encode(f.read()).decode('utf-8')
-            
-            payload = {"original": spoken_text, "translated": translated_text, "audio": audio_base64, "lang": "English"}
-            asyncio.run_coroutine_threadsafe(broadcast_payload(payload, "en"), server_loop)
+            # PATH B: Pastor speaks Ukrainian -> Translate to English
+            elif detected_lang == "uk" and len(clients["en"]) > 0:
+                response = requests.post('http://localhost:11434/api/generate', json={
+                    "model": "llama3:8b",
+                    "system": "You are a raw translation machine. You must output ONLY the direct English translation. Never include notes, explanations, introductions, or quotes.",
+                    "prompt": f"{glossary_line}Translate this Ukrainian church sermon phrase to natural English: {spoken_text}",
+                    "stream": False
+                })
+                translated_text = response.json()['response'].strip()
+                
+                # The Python Guillotine
+                translated_text = translated_text.split("Note:")[0].split("Notes:")[0].strip()
+                translated_text = translated_text.replace('"', '').replace("'", "").replace("*", "").strip()
+                
+                # The Anti-Moan Punctuation Lock
+                if not translated_text.endswith((".", "!", "?")):
+                    translated_text += "."
+                
+                if len(translated_text.split()) < 3:
+                    print(f"Skipping English TTS for short phrase: {translated_text}")
+                    return
+                
+                # NEW: Fish Audio API Call
+                fish_response = requests.post(
+                    "https://api.fish.audio/v1/tts",
+                    headers={
+                        "Authorization": f"Bearer {FISH_AUDIO_API_KEY}",
+                        "Content-Type": "application/json",
+                        "model": "s2.1-pro-free" # Use "s2.1-pro" for the paid production tier
+                    },
+                    json={
+                        "text": translated_text,
+                        "reference_id": current_voice_id["en"],
+                        "format": "wav"
+                    }
+                )
+                
+                if fish_response.status_code == 200:
+                    # Fish API returns raw bytes, so we encode it directly to base64 and bypass the hard drive
+                    audio_base64 = base64.b64encode(fish_response.content).decode('utf-8')
+                    
+                    payload = {"original": spoken_text, "translated": translated_text, "audio": audio_base64, "lang": "English"}
+                    asyncio.run_coroutine_threadsafe(broadcast_payload(payload, "en"), server_loop)
+                else:
+                    print(f"Fish Audio Error: {fish_response.text}")
 
     except Exception as e:
-        print(f"Pipeline Error: {e}")
+            print(f"Pipeline Error: {e}")
     finally:
-        if os.path.exists(temp_filename):
-            try:
-                os.remove(temp_filename)
-            except Exception:
-                pass
-
-def audio_callback(indata, frames, time, status):
-    if status: 
-        print(status) 
-    threading.Thread(target=process_audio, args=(indata.copy(),)).start()
+            if os.path.exists(temp_filename):
+                try:
+                    os.remove(temp_filename)
+                except Exception:
+                    pass
 
 @app.on_event("startup")
 async def startup_event():
     global audio_stream, server_loop
     server_loop = asyncio.get_running_loop() 
 
+    # NEW: Start the background worker thread
+    threading.Thread(target=transcription_worker, daemon=True).start()
+
     print("Connecting to Dante network...")
     try:
         audio_stream = sd.InputStream(
-            device=DANTE_INPUT_ID, 
-            channels=1, 
-            samplerate=SAMPLE_RATE,  
-            blocksize=int(SAMPLE_RATE * CHUNK_DURATION), 
-            callback=audio_callback 
+            device=DANTE_INPUT_ID,
+            channels=max(DANTE_CHANNELS), # open enough channels to reach the highest one selected
+            samplerate=SAMPLE_RATE,
+            blocksize=4096, # NEW: The tiny 4096-frame bucket size!
+            callback=audio_callback
         )
         audio_stream.start() 
         print("Dante stream successfully started!")
