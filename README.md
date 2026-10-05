@@ -7,14 +7,14 @@ Listeners open a web page on the church Wi-Fi, pick a language, and hear the tra
 ## How it works
 
 ```
-Dante mic ──► Whisper large-v3 (MLX) ──► Llama 3 8B (Ollama) ──► Fish Audio TTS ──► listeners' browsers
-              speech → text               translate uk ⇄ en       text → speech       (WebSocket)
+Dante mic ──► Whisper large-v3 (MLX) ──► Llama 3 8B (Ollama) ──► Google / Fish TTS ──► listeners' browsers
+              speech → text               translate uk ⇄ en       text → speech          (WebSocket)
 ```
 
 - **Audio**: captured from the Dante Virtual Soundcard and split into phrases at the pastor's pauses (a 12-second phrase is cut off even without a pause).
 - **Transcription**: runs locally on the Mac with [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper). Common Whisper hallucinations (e.g. "Thank you.", "The Word of God.") are filtered out sentence by sentence.
 - **Translation**: runs locally with Llama 3 8B through [Ollama](https://ollama.com). A phrase is only translated when someone is listening in the target language.
-- **Voice**: synthesized by the [Fish Audio](https://fish.audio) API (needs an API key and internet).
+- **Voice**: Ukrainian is synthesized by Google Cloud — [Gemini 3.1 Flash TTS](https://docs.cloud.google.com/text-to-speech/docs/gemini-tts) (preview) or the standard [Cloud Text-to-Speech](https://cloud.google.com/text-to-speech) voices (WaveNet, Chirp 3 HD), switchable from the admin page. English is synthesized by the [Fish Audio](https://fish.audio) API. Both need internet and API keys.
 
 ## Requirements
 
@@ -23,6 +23,7 @@ Dante mic ──► Whisper large-v3 (MLX) ──► Llama 3 8B (Ollama) ──�
 - [Ollama](https://ollama.com) with the `llama3:8b` model
 - [Dante Virtual Soundcard](https://www.getdante.com/products/software-essentials/dante-virtual-soundcard/) receiving the pastor's mic
 - A Fish Audio API key
+- A Google Cloud project with billing enabled, the Cloud Text-to-Speech API and the Agent Platform (Vertex AI) API enabled (see [Google Cloud keys](#google-cloud-keys))
 
 ## Setup
 
@@ -38,9 +39,9 @@ pip install fastapi uvicorn python-multipart mlx-whisper sounddevice numpy reque
 # Translation model
 ollama pull llama3:8b
 
-# API key
+# API keys
 cp .env.example .env
-# then edit .env and set FISH_AUDIO_API_KEY
+# then edit .env and fill in the keys (see Configuration)
 ```
 
 > `scipy` is pinned to 1.14.1 because the scipy 1.15.x wheels fail to load on recent macOS with `ImportError: ... section '__DATA/__thread_bss' has a zero-fill section type`.
@@ -72,7 +73,9 @@ Settings are constants near the top of `server.py`:
 |---|---|---|
 | `DANTE_CHANNELS` | `[63, 64]` | Dante input channels to capture, numbered as in Dante Controller |
 | `current_source_lang` | `"uk"` | Starting source language (`"en"`, `"uk"`, or `"auto"`); also set from the admin page |
-| `VOICE_OPTIONS` | 1 Ukrainian, 2 English | Fish Audio voice IDs shown in the admin voice picker. Add `{"name": ..., "id": ...}` entries for more |
+| `VOICE_OPTIONS` | 6 Ukrainian, 2 English | Voices shown in the admin voice picker; the first in each list is the default at startup. Ukrainian ids are Google voice names (`gemini:<Voice>` for Gemini TTS, e.g. `uk-UA-Chirp3-HD-Charon` otherwise); English ids are Fish Audio voice IDs. Add `{"name": ..., "id": ...}` entries for more |
+| `GEMINI_TTS_MODEL` | `gemini-3.1-flash-tts-preview` | Gemini model used for `gemini:` voices |
+| `GEMINI_TTS_STYLE` | calm, warm sermon delivery | Style instruction Gemini reads every phrase with |
 
 The pause detection thresholds (`SILENCE_THRESHOLD`, `PAUSE_CHUNKS`, `MAX_CHUNKS`) and the hallucination list (`HALLUCINATIONS`) are at the top of `transcription_worker()`.
 
@@ -80,7 +83,21 @@ Secrets go in `.env`, which git ignores:
 
 | Variable | Required | Description |
 |---|---|---|
-| `FISH_AUDIO_API_KEY` | yes | Fish Audio API key used for all speech synthesis |
+| `FISH_AUDIO_API_KEY` | yes | Fish Audio API key, used for English speech |
+| `GOOGLE_TTS_API_KEY` | yes | Standard Google Cloud API key restricted to the Cloud Text-to-Speech API, used for the WaveNet / Chirp / Standard Ukrainian voices |
+| `GOOGLE_GEMINI_TTS_KEY` | for Gemini voices | Google Cloud *auth key* (an API key bound to a service account) for the Agent Platform API |
+| `GOOGLE_CLOUD_PROJECT` | for Gemini voices | Google Cloud project number or ID |
+
+### Google Cloud keys
+
+Gemini voices can't use the regular Text-to-Speech key, and Google won't let one key cover both APIs, so there are two keys:
+
+1. **Text-to-Speech key**: APIs & Services → Credentials → Create credentials → API key, restricted to *Cloud Text-to-Speech API*.
+2. **Gemini auth key**:
+   - Create a service account (IAM & Admin → Service Accounts) and grant it the **Vertex AI User** role (IAM → Grant access).
+   - Create another API key restricted to *Agent Platform API* only, and bind it to that service account when prompted.
+
+Cost at 4–5 sermons a month: the WaveNet / Chirp voices stay inside Google's free tier. Gemini TTS is billed per second of audio, roughly $1.20–1.55 per sermon.
 
 ## Troubleshooting
 
@@ -95,7 +112,7 @@ Then update `DANTE_CHANNELS` (and the fallback ID in `get_dante_id()` if needed)
 
 **Translations never appear.** Check that Ollama is running and has the model: `ollama list` should show `llama3:8b`. Also check that the feed is started on the admin page and that at least one listener is connected in the target language.
 
-**Text appears but no audio.** Look for `Fish Audio Error` in the server output — usually a missing or invalid `FISH_AUDIO_API_KEY`. English translations under 3 words are intentionally dropped (neither shown nor spoken).
+**Text appears but no audio.** Look for `Google TTS Error (UK)` or `Fish Audio Error` in the server output — usually a missing or invalid key in `.env`. A `403` on a Gemini voice means the Agent Platform API isn't enabled or the service account is missing the Vertex AI User role; switch to a Chirp voice on the admin page to keep the service going. English translations under 3 words are intentionally dropped (neither shown nor spoken).
 
 **A phrase keeps showing up that the pastor didn't say.** Add it to `HALLUCINATIONS` in `server.py`. Matching is per whole sentence, so real speech that merely contains the phrase is kept.
 

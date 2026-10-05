@@ -749,7 +749,8 @@
 
                 const btn = document.createElement('div');
                 btn.className = 'voice-btn';
-                btn.onclick = () => {
+                btn.onclick = (e) => {
+                    e.stopPropagation();
                     openVoiceMenu = openVoiceMenu === lang ? null : lang;
                     renderVoiceTriggers();
                 };

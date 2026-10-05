@@ -14,6 +14,8 @@ import base64
 import os
 import re
 import time
+import io
+import wave
 from dotenv import load_dotenv
 
 # API keys live in .env (not committed to git). See .env.example.
@@ -21,6 +23,16 @@ load_dotenv()
 FISH_AUDIO_API_KEY = os.getenv("FISH_AUDIO_API_KEY")
 if not FISH_AUDIO_API_KEY:
     print("WARNING: FISH_AUDIO_API_KEY is not set. Copy .env.example to .env and add your key.")
+GOOGLE_TTS_API_KEY = os.getenv("GOOGLE_TTS_API_KEY")
+if not GOOGLE_TTS_API_KEY:
+    print("WARNING: GOOGLE_TTS_API_KEY is not set. Ukrainian audio will not play until you add it to .env.")
+# Gemini voices need a separate auth key bound to a service account (Agent Platform API)
+GOOGLE_GEMINI_TTS_KEY = os.getenv("GOOGLE_GEMINI_TTS_KEY")
+GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
+if not GOOGLE_GEMINI_TTS_KEY or not GOOGLE_CLOUD_PROJECT:
+    print("WARNING: GOOGLE_GEMINI_TTS_KEY or GOOGLE_CLOUD_PROJECT is not set. Gemini Ukrainian voices will not play.")
+GEMINI_TTS_MODEL = "gemini-3.1-flash-tts-preview"
+GEMINI_TTS_STYLE = "Read this calmly and warmly, like a pastor preaching a sermon"
 
 audio_queue = queue.Queue()
 
@@ -41,11 +53,18 @@ admin_clients = set()
 
 current_source_lang = "uk"
 
-# Fish Audio voice options, keyed by broadcast language. Add more
-# {"name": ..., "id": ...} entries here as you get more voice IDs.
+# Voice options, keyed by broadcast language. Ukrainian ids are Google Cloud
+# TTS voice names ("gemini:" prefix = Gemini TTS voice); English ids are Fish
+# Audio voice IDs. Add more {"name": ..., "id": ...} entries here as you get
+# more voices. The first entry is the default at startup.
 VOICE_OPTIONS = {
     "uk": [
-        {"name": "Default Ukrainian", "id": "fa45fe6682a341edb0c85390c7fe2834"},
+        {"name": "Gemini Charon (male)", "id": "gemini:Charon"},
+        {"name": "Gemini Kore (female)", "id": "gemini:Kore"},
+        {"name": "Google WaveNet (female)", "id": "uk-UA-Wavenet-B"},
+        {"name": "Google Chirp HD Charon (male)", "id": "uk-UA-Chirp3-HD-Charon"},
+        {"name": "Google Chirp HD Kore (female)", "id": "uk-UA-Chirp3-HD-Kore"},
+        {"name": "Google Standard (female)", "id": "uk-UA-Standard-B"},
     ],
     "en": [
         {"name": "Adrian", "id": "bf322df2096a46f18c579d0baa36f41d"},
@@ -503,29 +522,52 @@ def translate_and_broadcast(spoken_text, detected_lang, glossary_line):
                 if not translated_text.endswith((".", "!", "?")):
                     translated_text += "."
                 
-                # NEW: Fish Audio API Call for Ukrainian
-                fish_response = requests.post(
-                    "https://api.fish.audio/v1/tts",
-                    headers={
-                        "Authorization": f"Bearer {FISH_AUDIO_API_KEY}",
-                        "Content-Type": "application/json",
-                        "model": "s2.1-pro-free" # Use "s2.1-pro" for the paid production tier
-                    },
-                    json={
-                        "text": translated_text,
-                        "reference_id": current_voice_id["uk"],
-                        "format": "wav"
-                    }
-                )
-                
-                if fish_response.status_code == 200:
-                    # Encode directly to base64 to bypass the hard drive
-                    audio_base64 = base64.b64encode(fish_response.content).decode('utf-8')
-                    
+                uk_voice = current_voice_id["uk"]
+                if uk_voice.startswith("gemini:"):
+                    # Gemini TTS API Call for Ukrainian (via Agent Platform)
+                    google_response = requests.post(
+                        f"https://aiplatform.googleapis.com/v1/projects/{GOOGLE_CLOUD_PROJECT}/locations/global/publishers/google/models/{GEMINI_TTS_MODEL}:generateContent?key={GOOGLE_GEMINI_TTS_KEY}",
+                        json={
+                            "contents": [{"role": "user", "parts": [{"text": f"{GEMINI_TTS_STYLE}: {translated_text}"}]}],
+                            "generationConfig": {
+                                "responseModalities": ["AUDIO"],
+                                "speechConfig": {
+                                    "languageCode": "uk-UA",
+                                    "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": uk_voice.split(":", 1)[1]}}
+                                }
+                            }
+                        }
+                    )
+                else:
+                    # Google Cloud TTS API Call for Ukrainian
+                    google_response = requests.post(
+                        f"https://texttospeech.googleapis.com/v1/text:synthesize?key={GOOGLE_TTS_API_KEY}",
+                        json={
+                            "input": {"text": translated_text},
+                            "voice": {"languageCode": "uk-UA", "name": uk_voice},
+                            "audioConfig": {"audioEncoding": "LINEAR16"} # WAV
+                        }
+                    )
+
+                if google_response.status_code == 200:
+                    if uk_voice.startswith("gemini:"):
+                        # Gemini returns raw 24kHz 16-bit mono PCM, so wrap it in a WAV header for the browser
+                        pcm = base64.b64decode(google_response.json()["candidates"][0]["content"]["parts"][0]["inlineData"]["data"])
+                        wav_buffer = io.BytesIO()
+                        with wave.open(wav_buffer, "wb") as wav_file:
+                            wav_file.setnchannels(1)
+                            wav_file.setsampwidth(2)
+                            wav_file.setframerate(24000)
+                            wav_file.writeframes(pcm)
+                        audio_base64 = base64.b64encode(wav_buffer.getvalue()).decode('utf-8')
+                    else:
+                        # Google already returns the audio as base64, so it goes straight into the payload
+                        audio_base64 = google_response.json()["audioContent"]
+
                     payload = {"original": spoken_text, "translated": translated_text, "audio": audio_base64, "lang": "Ukrainian"}
                     asyncio.run_coroutine_threadsafe(broadcast_payload(payload, "uk"), server_loop)
                 else:
-                    print(f"Fish Audio Error (UK): {fish_response.text}")
+                    print(f"Google TTS Error (UK): {google_response.text}")
 
             # PATH B: Pastor speaks Ukrainian -> Translate to English
             elif detected_lang == "uk" and len(clients["en"]) > 0:
