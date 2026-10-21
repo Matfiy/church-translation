@@ -880,6 +880,8 @@
 
         function connectToServer() {
             const host = window.location.host;
+            // Secure socket when served over HTTPS (e.g. through the Cloudflare tunnel), plain on local Wi-Fi
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
 
             if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
             if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -889,7 +891,7 @@
                 gainNode.connect(audioCtx.destination);
             }
 
-            ws = new WebSocket(`ws://${host}/stream/${selectedLang}`);
+            ws = new WebSocket(`${wsProtocol}://${host}/stream/${selectedLang}`);
 
             ws.onopen = () => {
                 document.getElementById('status-dot').classList.add('live');

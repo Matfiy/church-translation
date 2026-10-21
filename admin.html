@@ -683,7 +683,9 @@
 
         function connectAdminSocket() {
             const host = window.location.host;
-            ws = new WebSocket(`ws://${host}/ws/admin`);
+            // Secure socket when served over HTTPS (e.g. through the Cloudflare tunnel), plain on local Wi-Fi
+            const wsProtocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
+            ws = new WebSocket(`${wsProtocol}://${host}/ws/admin`);
 
             ws.onopen = () => {
                 document.getElementById('run-dot').classList.toggle('on', isCapturing);
