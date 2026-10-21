@@ -911,7 +911,7 @@
                     appendTranscriptLine(payload.translated);
 
                     if (payload.audio) {
-                        const audioBlob = base64ToBlob(payload.audio, "audio/wav");
+                        const audioBlob = base64ToBlob(payload.audio, "audio/mpeg");
                         audioQueue.push(URL.createObjectURL(audioBlob));
                         processAudioQueue();
                     }

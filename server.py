@@ -14,8 +14,7 @@ import base64
 import os
 import re
 import time
-import io
-import wave
+import lameenc
 from dotenv import load_dotenv
 
 # API keys live in .env (not committed to git). See .env.example.
@@ -545,21 +544,21 @@ def translate_and_broadcast(spoken_text, detected_lang, glossary_line):
                         json={
                             "input": {"text": translated_text},
                             "voice": {"languageCode": "uk-UA", "name": uk_voice},
-                            "audioConfig": {"audioEncoding": "LINEAR16"} # WAV
+                            "audioConfig": {"audioEncoding": "MP3"} # compressed to save upload bandwidth
                         }
                     )
 
                 if google_response.status_code == 200:
                     if uk_voice.startswith("gemini:"):
-                        # Gemini returns raw 24kHz 16-bit mono PCM, so wrap it in a WAV header for the browser
+                        # Gemini returns raw 24kHz 16-bit mono PCM, so compress it to MP3 to save upload bandwidth
                         pcm = base64.b64decode(google_response.json()["candidates"][0]["content"]["parts"][0]["inlineData"]["data"])
-                        wav_buffer = io.BytesIO()
-                        with wave.open(wav_buffer, "wb") as wav_file:
-                            wav_file.setnchannels(1)
-                            wav_file.setsampwidth(2)
-                            wav_file.setframerate(24000)
-                            wav_file.writeframes(pcm)
-                        audio_base64 = base64.b64encode(wav_buffer.getvalue()).decode('utf-8')
+                        encoder = lameenc.Encoder()
+                        encoder.set_bit_rate(48)
+                        encoder.set_in_sample_rate(24000)
+                        encoder.set_channels(1)
+                        encoder.set_quality(2)
+                        mp3_bytes = encoder.encode(pcm) + encoder.flush()
+                        audio_base64 = base64.b64encode(mp3_bytes).decode('utf-8')
                     else:
                         # Google already returns the audio as base64, so it goes straight into the payload
                         audio_base64 = google_response.json()["audioContent"]
@@ -602,7 +601,8 @@ def translate_and_broadcast(spoken_text, detected_lang, glossary_line):
                     json={
                         "text": translated_text,
                         "reference_id": current_voice_id["en"],
-                        "format": "wav"
+                        "format": "mp3", # compressed to save upload bandwidth
+                        "mp3_bitrate": 64
                     }
                 )
                 

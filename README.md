@@ -2,19 +2,20 @@
 
 Live sermon translation for FUEBC. It listens to the pastor's microphone over Dante, transcribes and translates each phrase between Ukrainian and English, and speaks the translation to listeners' phones in their chosen language.
 
-Listeners open a web page on the church Wi-Fi, pick a language, and hear the translated audio with the text on screen. A tech-booth admin page controls the source language, starts and stops the feed, switches voices, and shows a live transcript.
+Listeners open **https://fuebc-translate.org** (in the building or from home), pick a language, and hear the translated audio with the text on screen. A tech-booth admin page controls the source language, starts and stops the feed, switches voices, and shows a live transcript.
 
 ## How it works
 
 ```
-Dante mic ──► Whisper large-v3 (MLX) ──► Llama 3 8B (Ollama) ──► Google / Fish TTS ──► listeners' browsers
-              speech → text               translate uk ⇄ en       text → speech          (WebSocket)
+Dante mic ──► Whisper large-v3 (MLX) ──► Llama 3 8B (Ollama) ──► Google / Fish TTS ──► Cloudflare Tunnel ──► listeners' browsers
+              speech → text               translate uk ⇄ en       text → speech (MP3)    fuebc-translate.org   (WebSocket)
 ```
 
 - **Audio**: captured from the Dante Virtual Soundcard and split into phrases at the pastor's pauses (a 12-second phrase is cut off even without a pause).
 - **Transcription**: runs locally on the Mac with [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper). Common Whisper hallucinations (e.g. "Thank you.", "The Word of God.") are filtered out sentence by sentence.
 - **Translation**: runs locally with Llama 3 8B through [Ollama](https://ollama.com). A phrase is only translated when someone is listening in the target language.
-- **Voice**: Ukrainian is synthesized by Google Cloud — [Gemini 3.1 Flash TTS](https://docs.cloud.google.com/text-to-speech/docs/gemini-tts) (preview) or the standard [Cloud Text-to-Speech](https://cloud.google.com/text-to-speech) voices (WaveNet, Chirp 3 HD), switchable from the admin page. English is synthesized by the [Fish Audio](https://fish.audio) API. Both need internet and API keys.
+- **Voice**: Ukrainian is synthesized by Google Cloud — [Gemini 3.1 Flash TTS](https://docs.cloud.google.com/text-to-speech/docs/gemini-tts) (preview) or the standard [Cloud Text-to-Speech](https://cloud.google.com/text-to-speech) voices (WaveNet, Chirp 3 HD), switchable from the admin page. English is synthesized by the [Fish Audio](https://fish.audio) API. Both need internet and API keys. All audio is sent to listeners as MP3 (~32–64 kbps) to keep the church's upload bandwidth low.
+- **Hosting**: the server runs on the church Mac. A [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/) makes it public at https://fuebc-translate.org, with no router changes. See [Public access](#public-access).
 
 ## Requirements
 
@@ -24,6 +25,7 @@ Dante mic ──► Whisper large-v3 (MLX) ──► Llama 3 8B (Ollama) ──�
 - [Dante Virtual Soundcard](https://www.getdante.com/products/software-essentials/dante-virtual-soundcard/) receiving the pastor's mic
 - A Fish Audio API key
 - A Google Cloud project with billing enabled, the Cloud Text-to-Speech API and the Agent Platform (Vertex AI) API enabled (see [Google Cloud keys](#google-cloud-keys))
+- For public access: the `fuebc-translate.org` Cloudflare account and `cloudflared` (`brew install cloudflared`)
 
 ## Setup
 
@@ -34,7 +36,7 @@ cd church-translation
 # Python environment
 python3.10 -m venv ai_env
 source ai_env/bin/activate
-pip install fastapi uvicorn python-multipart mlx-whisper sounddevice numpy requests python-dotenv coqui-tts "scipy==1.14.1"
+pip install fastapi uvicorn python-multipart mlx-whisper sounddevice numpy requests python-dotenv lameenc coqui-tts "scipy==1.14.1"
 
 # Translation model
 ollama pull llama3:8b
@@ -57,13 +59,14 @@ The first run downloads the Whisper model (`mlx-community/whisper-large-v3-mlx`,
    python server.py
    ```
    It listens on port 8000 on all network interfaces.
-3. In the tech booth, open the admin console at `http://<mac-ip>:8000/admin`:
+3. In the tech booth, open the admin console at **https://fuebc-translate.org/admin** (sign in with your email code), or `http://<mac-ip>:8000/admin` on the church Wi-Fi:
    - set the **source language** (Ukrainian, English, or auto-detect; defaults to Ukrainian)
    - optionally upload **sermon notes** as a `.txt` file — names and scripture references are extracted into a glossary so Whisper and the translator spell them consistently
    - press **Start** on the translation feed (capture is off when the server starts)
-4. Listeners open `http://<mac-ip>:8000/` on their phones and choose a language.
+4. Listeners open **https://fuebc-translate.org** on their phones and choose a language.
+5. Check the site from a phone on cellular data before people arrive.
 
-Find the Mac's IP address in System Settings → Wi-Fi → Details, or with `ipconfig getifaddr en0`.
+If the internet goes down, people on the church Wi-Fi can still use `http://<mac-ip>:8000/`. Find the Mac's IP address in System Settings → Wi-Fi → Details, or with `ipconfig getifaddr en0`.
 
 ## Configuration
 
@@ -99,6 +102,19 @@ Gemini voices can't use the regular Text-to-Speech key, and Google won't let one
 
 Cost at 4–5 sermons a month: the WaveNet / Chirp voices stay inside Google's free tier. Gemini TTS is billed per second of audio, roughly $1.20–1.55 per sermon.
 
+## Public access
+
+The church Mac is reachable at **https://fuebc-translate.org** through a Cloudflare Tunnel. The domain is registered at Cloudflare and is separate from firstuachurch.net.
+
+- **Tunnel** (Cloudflare Zero Trust → Networks → Tunnels → `church-mac`): `cloudflared` is installed on the Mac as a system service, so it connects automatically at boot. The public hostname `fuebc-translate.org` points to `http://localhost:8000`. The Mac makes an outgoing connection, so no router ports are opened.
+- **Admin login** (Zero Trust → Access → Applications → `Translation Admin`): the paths `admin*` and `ws/admin` require an approved email address and a one-time code. To give someone access, add their email to the policy. **Any new admin-only route must start with `/admin`, or be added to this application.**
+- **Offline page** (Workers & Pages): [`cloudflare/offline-worker.js`](cloudflare/offline-worker.js) passes every request through to the Mac. When the Mac is off or `server.py` isn't running, it shows a bilingual "translation isn't live right now" page that refreshes every minute.
+- **WebSockets**: the pages use `wss://` over HTTPS and `ws://` over plain HTTP, so the public address and the local Wi-Fi address both work.
+
+The Mac can stay off between services. Nothing has to be redone, and nothing is billed while it's off.
+
+**Updating the offline page:** edit `cloudflare/offline-worker.js`, then paste it into the Worker's editor in the Cloudflare dashboard (Workers & Pages → the worker → Edit code) and click **Deploy**.
+
 ## Troubleshooting
 
 **No audio / "Failed to initialize Dante input device".** The server looks for an input device with "dante" in its name and falls back to device ID 1. Two helper scripts help find the right one:
@@ -114,6 +130,8 @@ Then update `DANTE_CHANNELS` (and the fallback ID in `get_dante_id()` if needed)
 
 **Text appears but no audio.** Look for `Google TTS Error (UK)` or `Fish Audio Error` in the server output — usually a missing or invalid key in `.env`. A `403` on a Gemini voice means the Agent Platform API isn't enabled or the service account is missing the Vertex AI User role; switch to a Chirp voice on the admin page to keep the service going. English translations under 3 words are intentionally dropped (neither shown nor spoken).
 
+**fuebc-translate.org shows the offline page during a service.** The Mac is on, but the server isn't answering. Check that `server.py` is running and that Ollama is open. If it's running, check the tunnel status in Zero Trust → Networks → Tunnels; it should say *Healthy*. To restart the connector, run `sudo launchctl kickstart -k system/com.cloudflare.cloudflared`.
+
 **A phrase keeps showing up that the pastor didn't say.** Add it to `HALLUCINATIONS` in `server.py`. Matching is per whole sentence, so real speech that merely contains the phrase is kept.
 
 ## Project layout
@@ -124,6 +142,7 @@ index.html      listener page (/)
 admin.html      tech-booth console (/admin)
 find_audio.py   lists audio devices
 xray.py         scans Dante channels for signal
+cloudflare/offline-worker.js   Cloudflare Worker that shows the offline page when the Mac is off
 .env.example    template for .env
 ```
 
