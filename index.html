@@ -130,18 +130,6 @@
             }
         }
 
-        @keyframes eq {
-
-            0%,
-            100% {
-                transform: scaleY(.25);
-            }
-
-            50% {
-                transform: scaleY(1);
-            }
-        }
-
         /* setup panel */
         #setup-panel {
             flex: 1;
@@ -307,22 +295,6 @@
             background: #f7f8fa;
         }
 
-        .mute-btn {
-            width: 46px;
-            height: 46px;
-            flex: none;
-            border-radius: 99px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            background: var(--accent);
-            color: #fff;
-            border: none;
-            font-size: 16px;
-            box-shadow: 0 6px 16px color-mix(in srgb, var(--accent) 28%, transparent);
-        }
-
         .playbar-main {
             flex: 1;
             display: flex;
@@ -330,34 +302,6 @@
             gap: 12px;
             min-width: 0;
         }
-
-        .eq {
-            display: flex;
-            align-items: flex-end;
-            gap: 3px;
-            height: 22px;
-        }
-
-        .eq span {
-            flex: 1;
-            min-width: 2px;
-            border-radius: 2px;
-            background: rgba(var(--ink), .2);
-            transform-origin: bottom;
-        }
-
-        .eq.playing span {
-            background: var(--accent);
-        }
-
-        .eq.playing span:nth-child(1) { height: 8px; animation: eq 720ms ease-in-out infinite; }
-        .eq.playing span:nth-child(2) { height: 18px; animation: eq 640ms ease-in-out 90ms infinite; }
-        .eq.playing span:nth-child(3) { height: 12px; animation: eq 880ms ease-in-out 180ms infinite; }
-        .eq.playing span:nth-child(4) { height: 20px; animation: eq 560ms ease-in-out 270ms infinite; }
-        .eq.playing span:nth-child(5) { height: 10px; animation: eq 760ms ease-in-out 360ms infinite; }
-        .eq.playing span:nth-child(6) { height: 16px; animation: eq 680ms ease-in-out 450ms infinite; }
-        .eq.playing span:nth-child(7) { height: 9px; animation: eq 840ms ease-in-out 540ms infinite; }
-        .eq.playing span:nth-child(8) { height: 19px; animation: eq 600ms ease-in-out 630ms infinite; }
 
         .vol-row {
             display: flex;
@@ -450,22 +394,51 @@
             color: var(--accent);
         }
 
+        /* While connected, the app is locked to one screen so the controls
+           never scroll away; only the transcript scrolls */
+        body.is-live .app {
+            height: 100vh;
+            height: 100dvh;
+            min-height: 0;
+            overflow: hidden;
+        }
+
         #transcript-feed {
             flex: 1;
+            min-height: 0;
+            position: relative;
             overflow-y: auto;
+            overflow-anchor: none;
             padding: 24px 24px 32px;
             display: flex;
             flex-direction: column;
             gap: 22px;
         }
 
+        /* Teleprompter line states: arrives (dim) -> speaking (highlighted)
+           -> spoken (gray, smaller) -> leaving (fades out after a minute) */
         .line {
             opacity: .55;
-            transition: opacity .4s ease;
+            padding: 10px 14px;
+            margin: 0 -14px;
+            border-radius: 12px;
+            border-left: 3px solid transparent;
+            transition: opacity .4s ease, background-color .4s ease, border-color .4s ease;
         }
 
-        .line.latest {
+        .line.speaking {
             opacity: 1;
+            background: color-mix(in srgb, var(--accent) 8%, #fff);
+            border-left-color: var(--accent);
+        }
+
+        .line.spoken {
+            opacity: .4;
+        }
+
+        .line.leaving {
+            opacity: 0;
+            transition: opacity .6s ease;
         }
 
         .line-time {
@@ -480,11 +453,20 @@
             font: 400 15px/1.5 "Helvetica Neue", Helvetica, sans-serif;
             letter-spacing: -.01em;
             text-wrap: pretty;
+            transition: font-size .35s ease;
         }
 
-        .line.latest .line-text {
+        .line.speaking .line-text {
             font-size: var(--cap-size);
             line-height: 1.45;
+        }
+
+        .line.spoken .line-text {
+            font-size: 13.5px;
+        }
+
+        .line:not(.speaking) .caret {
+            display: none;
         }
 
         .caret {
@@ -507,11 +489,6 @@
             padding: 20px 56px 22px;
             border-top: 1px solid rgba(var(--ink), .09);
             background: #f7f8fa;
-        }
-
-        .bottom-bar .eq {
-            width: 200px;
-            height: 26px;
         }
 
         .bottom-bar .vol-row {
@@ -622,23 +599,29 @@
             #transcript-feed {
                 flex: 1;
                 padding: 48px 56px 0;
-                justify-content: flex-end;
                 gap: 30px;
             }
 
-            .line {
-                opacity: .38;
+            /* Pushes lines to the bottom like before, but unlike
+               justify-content: flex-end it still lets the feed scroll */
+            #transcript-feed > .line:first-child {
+                margin-top: auto;
             }
 
-            .line.latest {
-                opacity: 1;
+            .line {
+                padding: 14px 20px;
+                margin: 0 -20px;
             }
 
             .line-text {
                 font-size: calc(var(--cap-size) + 6px);
             }
 
-            .line.latest .line-text {
+            .line.spoken .line-text {
+                font-size: calc(var(--cap-size) - 2px);
+            }
+
+            .line.speaking .line-text {
                 font-size: calc(var(--cap-size) + 15px);
                 max-width: 820px;
             }
@@ -742,12 +725,7 @@
             <div class="live-body">
                 <div class="live-main">
                     <div class="playbar">
-                        <button class="mute-btn" id="mute-btn" onclick="toggleMute()">&#128266;</button>
                         <div class="playbar-main">
-                            <div class="eq playing" id="eq-animation">
-                                <span></span><span></span><span></span><span></span>
-                                <span></span><span></span><span></span><span></span>
-                            </div>
                             <div class="vol-row">
                                 <span class="vol-label">VOL</span>
                                 <input type="range" class="vol-slider" id="vol-slider" min="0" max="100" value="85">
@@ -765,11 +743,6 @@
 
                     <!-- desktop-only: playback + volume + caption size in one bar -->
                     <div class="bottom-bar">
-                        <button class="mute-btn" id="mute-btn-lg" onclick="toggleMute()">&#128266;</button>
-                        <div class="eq playing" id="eq-animation-lg">
-                            <span></span><span></span><span></span><span></span>
-                            <span></span><span></span><span></span><span></span>
-                        </div>
                         <div class="vol-row">
                             <span class="vol-label">VOL</span>
                             <input type="range" class="vol-slider" id="vol-slider-lg" min="0" max="100" value="85">
@@ -805,11 +778,14 @@
         let audioCtx;
         let gainNode;
         let lastVolume = 0.85;
-        let muted = false;
-        const audioQueue = [];
+        // Phrases are decoded one after another so they always play (and
+        // highlight) in the order they arrived
+        let playChain = Promise.resolve();
         let nextStartTime = 0;
-        let lineCount = 0;
-        let latestLineEl = null;
+        // Bumped on Leave / language switch so phrases still being decoded are dropped
+        let playGeneration = 0;
+        const activeSources = new Set();
+        const LINE_LIFETIME_MS = 60000; // spoken lines are removed after a minute
 
         function renderLangList() {
             const list = document.getElementById('lang-list');
@@ -852,9 +828,7 @@
         function switchLanguage(code) {
             if (code === selectedLang || !ws) return;
             selectedLang = code;
-            latestLineEl = null;
-            lineCount = 0;
-            document.getElementById('transcript-feed').innerHTML = '';
+            stopPlayback();
             ws.close();
             connectToServer();
             renderLangList();
@@ -894,6 +868,7 @@
             ws = new WebSocket(`${wsProtocol}://${host}/stream/${selectedLang}`);
 
             ws.onopen = () => {
+                document.body.classList.add('is-live');
                 document.getElementById('status-dot').classList.add('live');
                 document.getElementById('setup-panel').style.display = 'none';
                 document.getElementById('live-panel').style.display = 'flex';
@@ -906,19 +881,17 @@
             };
 
             ws.onmessage = async (event) => {
+                if (event.target !== ws) return; // late message from a socket we already left
                 try {
                     const payload = JSON.parse(event.data);
-                    appendTranscriptLine(payload.translated);
+                    const lineEl = appendTranscriptLine(payload.translated);
 
-                    if (payload.audio) {
-                        const audioBlob = base64ToBlob(payload.audio, "audio/mpeg");
-                        audioQueue.push(URL.createObjectURL(audioBlob));
-                        processAudioQueue();
-                    }
+                    queueAudio(payload.audio ? base64ToBlob(payload.audio, "audio/mpeg") : null, lineEl);
                 } catch (e) { console.error(e); }
             };
 
-            ws.onclose = () => {
+            ws.onclose = (event) => {
+                if (event.target !== ws) return; // old socket closing after a language switch
                 document.getElementById('status-dot').classList.remove('live');
                 document.getElementById('status-text').textContent = 'Ready';
             };
@@ -926,61 +899,118 @@
 
         function disconnectFromServer() {
             if (ws) ws.close();
+            stopPlayback();
+            document.body.classList.remove('is-live');
             document.getElementById('setup-panel').style.display = 'flex';
             document.getElementById('live-panel').style.display = 'none';
             document.getElementById('status-dot').classList.remove('live');
             document.getElementById('status-text').textContent = 'Ready';
         }
 
-        function toggleMute() {
-            if (!gainNode) return;
-            muted = !muted;
-            const icon = muted ? '&#128263;' : '&#128266;';
-            document.querySelectorAll('.mute-btn').forEach(btn => btn.innerHTML = icon);
-            document.querySelectorAll('.eq').forEach(eq => eq.classList.toggle('playing', !muted));
-            gainNode.gain.value = muted ? 0 : (lastVolume || 0.85);
+        // Silences everything: stops the phrase playing now, drops queued
+        // phrases, and clears the transcript
+        function stopPlayback() {
+            playGeneration++;
+            activeSources.forEach(source => {
+                try { source.stop(); } catch (e) { /* already stopped */ }
+            });
+            activeSources.clear();
+            playChain = Promise.resolve();
+            if (audioCtx) nextStartTime = audioCtx.currentTime;
+            document.getElementById('transcript-feed').innerHTML = '';
         }
 
-        function processAudioQueue() {
-            if (audioQueue.length === 0) return;
-            const nextUrl = audioQueue.shift();
-
-            fetch(nextUrl)
-                .then(r => r.arrayBuffer())
+        // Schedules a phrase right after the previous one and ties its
+        // transcript line to it: highlighted while playing, gray once done
+        function queueAudio(blob, lineEl) {
+            const generation = playGeneration;
+            if (!blob) {
+                // No audio for this line: highlight it for a few seconds once
+                // the phrases ahead of it have finished playing
+                playChain = playChain.then(() => {
+                    if (generation !== playGeneration) return;
+                    const startsInMs = Math.max(0, (nextStartTime - audioCtx.currentTime) * 1000);
+                    setTimeout(() => setLineState(lineEl, 'speaking'), startsInMs);
+                    setTimeout(() => setLineState(lineEl, 'spoken'), startsInMs + 3000);
+                });
+                return;
+            }
+            playChain = playChain
+                .then(() => blob.arrayBuffer())
                 .then(b => audioCtx.decodeAudioData(b))
                 .then(audioBuffer => {
+                    if (generation !== playGeneration) return; // listener left while this was decoding
                     const source = audioCtx.createBufferSource();
                     source.buffer = audioBuffer;
                     source.connect(gainNode);
+                    activeSources.add(source);
 
                     if (nextStartTime < audioCtx.currentTime) nextStartTime = audioCtx.currentTime;
+                    const startsInMs = (nextStartTime - audioCtx.currentTime) * 1000;
                     source.start(nextStartTime);
                     nextStartTime += audioBuffer.duration;
 
-                    source.onended = () => URL.revokeObjectURL(nextUrl);
+                    setTimeout(() => setLineState(lineEl, 'speaking'), startsInMs);
+                    source.onended = () => {
+                        activeSources.delete(source);
+                        setLineState(lineEl, 'spoken');
+                    };
+                })
+                .catch(err => {
+                    console.error("Audio playback error:", err);
+                    setLineState(lineEl, 'spoken');
                 });
         }
 
         function appendTranscriptLine(text) {
             const feed = document.getElementById('transcript-feed');
 
-            if (latestLineEl) latestLineEl.classList.remove('latest');
-
             const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const card = document.createElement('div');
-            card.className = 'line latest';
+            card.className = 'line';
             card.innerHTML = `
                 <div class="line-time">${time}</div>
                 <div class="line-text">${escapeHtml(text)}<span class="caret"></span></div>
             `;
             feed.appendChild(card);
-            latestLineEl = card;
-            feed.scrollTop = feed.scrollHeight;
+            return card;
+        }
 
-            lineCount++;
-            if (lineCount > 200) {
-                feed.removeChild(feed.firstElementChild);
+        function setLineState(lineEl, state) {
+            if (!lineEl.isConnected) return; // feed was cleared (language switch)
+            if (lineEl.classList.contains(state)) return;
+            if (state === 'speaking' && lineEl.classList.contains('spoken')) return;
+            lineEl.classList.remove('speaking', 'spoken');
+            lineEl.classList.add(state);
+
+            if (state === 'speaking') {
+                // Only one line is highlighted at a time
+                let prev = lineEl.previousElementSibling;
+                while (prev) {
+                    if (prev.classList.contains('speaking')) setLineState(prev, 'spoken');
+                    prev = prev.previousElementSibling;
+                }
+                // Keep the line being read in the upper part of the feed, like a teleprompter
+                const feed = document.getElementById('transcript-feed');
+                feed.scrollTo({ top: lineEl.offsetTop - feed.clientHeight * 0.3, behavior: 'smooth' });
+            } else if (state === 'spoken') {
+                setTimeout(() => removeLine(lineEl), LINE_LIFETIME_MS);
             }
+        }
+
+        function removeLine(lineEl) {
+            if (!lineEl.isConnected) return;
+            lineEl.classList.add('leaving');
+            setTimeout(() => {
+                if (!lineEl.isConnected) return;
+                const feed = document.getElementById('transcript-feed');
+                // If the line is above what the listener is looking at, shift the
+                // scroll position up by its height so the visible text doesn't jump
+                const wasAbove = lineEl.offsetTop < feed.scrollTop;
+                const removedHeight = lineEl.offsetHeight + parseFloat(getComputedStyle(feed).rowGap || 0);
+                lineEl.remove();
+                if (wasAbove) feed.scrollTop -= removedHeight;
+            }, 600);
         }
 
         function escapeHtml(str) {
@@ -1007,11 +1037,6 @@
                 const v = Number(raw) / 100;
                 document.querySelectorAll('.vol-slider').forEach(s => { if (s !== e.target) s.value = raw; });
                 document.querySelectorAll('.vol-value').forEach(el => el.textContent = raw);
-                if (muted) {
-                    muted = false;
-                    document.querySelectorAll('.mute-btn').forEach(btn => btn.innerHTML = '&#128266;');
-                    document.querySelectorAll('.eq').forEach(eq => eq.classList.add('playing'));
-                }
                 lastVolume = v;
                 if (gainNode) gainNode.gain.value = v;
             });
