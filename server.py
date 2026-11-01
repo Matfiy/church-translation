@@ -130,9 +130,13 @@ async def set_admin_language(lang: str):
 # dynamic websocket that accepts user's language choice
 @app.websocket("/stream/{language}") 
 async def websocket_endpoint(websocket: WebSocket, language: str):
+    if language not in clients:
+        await websocket.close(code=1008)
+        return
     await websocket.accept()
     clients[language].add(websocket) 
     print(f"Client joined {language.upper()}. Total listeners: {len(clients[language])}")
+    await broadcast_listener_counts()
 
     try:
         while True:
@@ -140,9 +144,9 @@ async def websocket_endpoint(websocket: WebSocket, language: str):
     except Exception:
         pass
     finally:
-        if language in clients:
-            clients[language].remove(websocket) 
-            print(f"Client disconnected from {language.upper()}. Total listeners: {len(clients[language])}")
+        clients[language].discard(websocket)
+        print(f"Client disconnected from {language.upper()}. Total listeners: {len(clients[language])}")
+        await broadcast_listener_counts()
 
 # Serve the Admin Dashboard Page
 @app.get("/admin", response_class=HTMLResponse)
@@ -155,13 +159,14 @@ async def get_admin_dashboard():
 async def admin_websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     admin_clients.add(websocket)
+    await websocket.send_json(listener_counts())
     try:
         while True:
             await websocket.receive_text()
     except Exception:
         pass
     finally:
-        admin_clients.remove(websocket)
+        admin_clients.discard(websocket)
 
 # logic for start/stop button
 @app.post("/admin/set_capture/{state}")
@@ -242,7 +247,7 @@ async def set_voice(lang: str, voice_id: str):
 # Update broadcast_payload to also notify the admin dashboard
 async def broadcast_payload(payload: dict, target_language: str):
     # Send to active listeners
-    for client in clients[target_language]: 
+    for client in list(clients[target_language]): 
         try:
             await client.send_json(payload) 
         except:
@@ -255,9 +260,21 @@ async def broadcast_payload(payload: dict, target_language: str):
         "translated": payload["translated"],
         "lang": payload["lang"]
     }
-    for admin in admin_clients:
+    for admin in list(admin_clients):
         try:
             await admin.send_json(admin_data)
+        except:
+            pass
+
+def listener_counts():
+    return {"type": "listeners", "en": len(clients["en"]), "uk": len(clients["uk"])}
+
+# Pushes the current listener numbers to every open admin dashboard
+async def broadcast_listener_counts():
+    counts = listener_counts()
+    for admin in list(admin_clients):
+        try:
+            await admin.send_json(counts)
         except:
             pass
 

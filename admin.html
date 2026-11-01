@@ -693,6 +693,10 @@
 
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
+                if (data.type === "listeners") {
+                    document.getElementById('count-en').textContent = data.en;
+                    document.getElementById('count-uk').textContent = data.uk;
+                }
                 if (data.type === "transcript") {
                     const feed = document.getElementById('transcript-feed');
                     if (feed.querySelector('.t-empty')) feed.innerHTML = '';
