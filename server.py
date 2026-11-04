@@ -9,6 +9,7 @@ import uvicorn
 import asyncio
 import threading
 import queue
+import collections
 import concurrent.futures
 import base64  
 import os
@@ -49,6 +50,9 @@ clients = {
 }
 
 admin_clients = set()
+
+# (language, text) of the last few translated phrases, given to the translator as context
+recent_sentences = collections.deque(maxlen=3)
 
 current_source_lang = "uk"
 
@@ -291,21 +295,25 @@ def audio_callback(indata, frames, time, status):
 def transcription_worker():
     global is_capturing
 
-    # Smart VAD Thresholds
+    # Smart VAD Thresholds (one audio chunk = 4096 frames at 48kHz, about 85ms)
     SILENCE_THRESHOLD = 0.015
-    PAUSE_CHUNKS = 70 # trying a longer pause treshold
     MIN_CHUNKS = 12 # ~1.0 second minimum audio length
-    MAX_CHUNKS = 140 # ~12 seconds maximum audio length (force cut)
+    MAX_CHUNKS = 211 # ~18 seconds maximum audio length (force cut)
+    QUIET_SEARCH_CHUNKS = 35 # a force cut looks back ~3 seconds for the quietest moment
+    PRE_ROLL_CHUNKS = 4 # ~0.35 seconds kept from just before speech starts
+    STOPPED_TALKING_CHUNKS = 23 # ~2 seconds of silence sends a held unfinished sentence anyway
+    FLUSH_FRAGMENT_CHUNKS = 176 # ~15 seconds with no sentence ending: send it rather than wait longer
+    CARRY_PADDING_SECONDS = 0.1 # audio kept before a held sentence's first word
 
-    # Smart Punctuation Trigger: a chunk that doesn't end in terminal
-    # punctuation is likely a mid-sentence VAD cut. Hold it here and merge
-    # it with the next transcribed chunk instead of translating a fragment.
     SENTENCE_ENDINGS = (".", "!", "?", "…")
     CLOSING_CHARS = "\"'”’)]»" # trailing quotes/brackets, e.g. closing a scripture quote
-    HOLD_LIMIT = 2 # force-flush after this many stalled attempts so a phrase can't hang forever
     HALLUCINATIONS = ["thank you", "thanks for watching", "i'll call you my friend", "so it's a little later", "дякую", "you", "Let us open in prayer.", "Let us pray.", "the word of God", "word of god",
                       "Welcome, everyone.", "Today we will look closely at the Word of God.",
-                      "Ласкаво просимо.", "Сьогодні ми уважно розглянемо Слово Боже.", "Слово Боже", "Помолімося разом."]
+                      "Ласкаво просимо.", "Сьогодні ми уважно розглянемо Слово Боже.", "Слово Боже", "Помолімося разом.",
+                      # YouTube sign-offs Whisper picked up in training and invents during quiet moments
+                      "Subscribe to the channel", "Subscribe to my channel", "Subscribe to our channel", "Please subscribe", "Like and subscribe",
+                      "Don't forget to subscribe", "Thank you for watching", "See you in the next video",
+                      "Підписуйтесь на канал", "Підпишіться на канал", "Підписуйтесь на наш канал", "Дякую за перегляд", "Дякуємо за перегляд", "Дякую за увагу", "До зустрічі в наступному відео"]
 
     # Whisper mimics the punctuation/formatting style of whatever text it's
     # given as context, so priming it with a fully-punctuated example nudges
@@ -328,79 +336,123 @@ def transcription_worker():
         hallucination_set.update(normalize(s) for s in re.split(r"(?<=[.!?…])\s+", prompt))
     hallucination_set.discard("")
 
-    # Drops hallucinated sentences from anywhere in the transcription (start,
-    # middle, or end) and keeps the real speech around them
-    def strip_hallucinations(result):
-        kept = []
-        for segment in result.get("segments", []):
-            for sentence in re.split(r"(?<=[.!?…])\s+", segment["text"].strip()):
-                cleaned = normalize(sentence)
-                if not cleaned:
-                    continue
-                if cleaned in hallucination_set or cleaned.startswith("todays terms"):
-                    print(f"[Dropped hallucination] {sentence}")
-                    continue
-                kept.append(sentence)
-        return " ".join(kept).strip()
-
     def ends_sentence(text):
         return text.rstrip(CLOSING_CHARS).endswith(SENTENCE_ENDINGS)
 
-    pending_text = ""
-    pending_lang = None
-    pending_holds = 0
+    # Splits the transcription into sentences with the time each one starts,
+    # dropping hallucinated sentences from anywhere (start, middle, or end)
+    def split_sentences(result):
+        sentences = []
+        def add(text, start):
+            text = text.strip()
+            cleaned = normalize(text)
+            if not cleaned:
+                return
+            if cleaned in hallucination_set or cleaned.startswith("todays terms"):
+                print(f"[Dropped hallucination] {text}")
+                return
+            sentences.append({"text": text, "start": start})
+
+        words = []
+        start = None
+        for segment in result.get("segments", []):
+            for word in segment.get("words") or []:
+                if start is None:
+                    start = word["start"]
+                words.append(word["word"])
+                if ends_sentence(word["word"].strip()):
+                    add("".join(words), start)
+                    words = []
+                    start = None
+        if words:
+            add("".join(words), start)
+        return sentences
+
+    def chunk_volume(data):
+        if data.shape[1] > 1:
+            return np.max(np.abs(np.mean(data, axis=1)))
+        return np.max(np.abs(data.flatten()))
+
+    # A longer phrase takes a shorter pause to end. Don't go below ~0.5 seconds:
+    # Whisper puts a false period at a mid-sentence breath if the audio stops there.
+    def pause_chunks_needed(total_chunks):
+        if total_chunks < 47: # under ~4 seconds
+            return 8 # ~0.7 second pause
+        return 6 # ~0.5 second pause
+
+    # Audio of a sentence that wasn't finished yet. It goes back through Whisper
+    # together with what comes next, so the whole sentence is heard at once.
+    carried_chunks = []
 
     while True:
         # if capture paused, clear queue and sleeo
         if not is_capturing:
             with audio_queue.mutex:
                 audio_queue.queue.clear()
-            pending_text = ""
-            pending_lang = None
-            pending_holds = 0
+            carried_chunks = []
+            recent_sentences.clear()
             time.sleep(0.5)
             continue
-        
-        accumulated_audio = []
+
+        accumulated_audio = carried_chunks
+        volumes = [chunk_volume(chunk) for chunk in accumulated_audio]
+        has_carried_audio = bool(carried_chunks)
+        carried_chunks = []
+        new_speech = False
         silence_counter = 0
+        cut_reason = "stopped"
 
         # dynamic gathering loop
-        while True:
-            if not is_capturing:
-                break
-
+        while is_capturing:
             try:
                 data = audio_queue.get(timeout=0.5)
-                accumulated_audio.append(data)
-
-                # check volume of tiny audio slice
-                if data.shape[1] > 1:
-                    chunk_volume = np.max(np.abs(np.mean(data, axis=1)))
-                else:
-                    chunk_volume = np.max(np.abs(data.flatten()))
-                
-                # If it's quiet, count up the silence. If he speaks, reset the counter!
-                if chunk_volume < SILENCE_THRESHOLD:
-                    silence_counter += 1
-                else:
-                    silence_counter = 0 
-
-                total_chunks = len(accumulated_audio)
-
-                # trigger 1: preacher took a breath (silence) and spoke long enough
-                if silence_counter >= PAUSE_CHUNKS and total_chunks >= MIN_CHUNKS:
-                    break
-
-                # trigger 2: preacher has not taken a breath in 12 seconds (force cut)
-                if total_chunks >= MAX_CHUNKS:
-                    break
-
             except queue.Empty:
                 continue
 
-            # prevent processing if paused mid-sentance or if bucket is empty
-            if not is_capturing or not accumulated_audio:
+            # check volume of tiny audio slice
+            volume = chunk_volume(data)
+            accumulated_audio.append(data)
+            volumes.append(volume)
+
+            # If it's quiet, count up the silence. If he speaks, reset the counter!
+            if volume < SILENCE_THRESHOLD:
+                silence_counter += 1
+            else:
+                silence_counter = 0
+                new_speech = True
+
+            if not new_speech:
+                if has_carried_audio:
+                    # he finished talking mid-sentence: stop waiting for the rest
+                    if silence_counter >= STOPPED_TALKING_CHUNKS:
+                        cut_reason = "stopped"
+                        break
+                else:
+                    # nothing said yet: keep a short lead-in, not the silence
+                    accumulated_audio = accumulated_audio[-PRE_ROLL_CHUNKS:]
+                    volumes = volumes[-PRE_ROLL_CHUNKS:]
                 continue
+
+            total_chunks = len(accumulated_audio)
+
+            # trigger 1: preacher took a breath (silence) and spoke long enough
+            if silence_counter >= pause_chunks_needed(total_chunks) and total_chunks >= MIN_CHUNKS:
+                cut_reason = "pause"
+                break
+
+            # trigger 2: preacher has not taken a breath in 18 seconds (force cut
+            # at the quietest recent moment, keeping the rest for the next phrase)
+            if total_chunks >= MAX_CHUNKS:
+                search_from = total_chunks - QUIET_SEARCH_CHUNKS
+                cut_at = search_from + int(np.argmin(volumes[search_from:])) + 1
+                carried_chunks = accumulated_audio[cut_at:]
+                accumulated_audio = accumulated_audio[:cut_at]
+                cut_reason = "max length"
+                break
+
+        # paused before anything was said
+        if not new_speech and not has_carried_audio:
+            continue
 
         # 2. Stitch chunks together
         indata = np.concatenate(accumulated_audio, axis=0)
@@ -452,73 +504,91 @@ def transcription_worker():
                 )
 
             detected_lang = result.get("language", "unknown")
-            spoken_text = strip_hallucinations(result)
-            
+            sentences = split_sentences(result)
+
         except Exception as e:
             print(f"MLX Transcription Error: {e}")
-            # can't safely flush pending text without a replacement chunk to attach it to
-            if pending_text:
-                pending_holds += 1
             continue
 
-        # The Diagnostic Print
-        # We removed the print statement here so it stops spamming every guess
-
         # A chunk is "noise" if it's the wrong language or nothing is left
-        # after strip_hallucinations removed the known Whisper hallucinations
-        is_noise = (
-            detected_lang not in ["en", "uk"]
-            or not spoken_text
-        )
+        # after split_sentences removed the known Whisper hallucinations
+        if detected_lang not in ["en", "uk"] or not sentences:
+            continue
 
-        if is_noise:
-            # a noise chunk still counts as a stalled attempt, so a held
-            # fragment eventually gets flushed instead of waiting forever
-            # for a "real" chunk that never merges with it
-            if pending_text and pending_holds >= HOLD_LIMIT:
-                spoken_text = pending_text
-                detected_lang = pending_lang
-                pending_text = ""
-                pending_lang = None
-                pending_holds = 0
+        # Whisper tends to add a period wherever the audio stops, so after a
+        # force cut the last sentence can't be trusted even if it has one
+        last_is_finished = ends_sentence(sentences[-1]["text"]) and cut_reason != "max length"
+        complete = sentences if last_is_finished else sentences[:-1]
+        is_complete = True
+
+        if not last_is_finished:
+            if cut_reason == "stopped" or (not complete and len(accumulated_audio) >= FLUSH_FRAGMENT_CHUNKS):
+                # nothing more is coming, or it has run too long without an ending
+                complete = sentences
+                is_complete = False
             else:
-                if pending_text:
-                    pending_holds += 1
-                continue
-        else:
-            # Merge with anything held back from a previous fragment
-            if pending_text:
-                spoken_text = f"{pending_text} {spoken_text}".strip()
+                # Hold the unfinished sentence: its audio goes back into the next phrase
+                tail_start = max(0, int((sentences[-1]["start"] - CARRY_PADDING_SECONDS) * SAMPLE_RATE))
+                tail = indata[tail_start:]
+                tail_chunks = [tail[i:i + 4096] for i in range(0, len(tail), 4096)]
+                # no need to keep the silence after it, just a short gap
+                while len(tail_chunks) > 2 and chunk_volume(tail_chunks[-1]) < SILENCE_THRESHOLD and chunk_volume(tail_chunks[-2]) < SILENCE_THRESHOLD:
+                    tail_chunks.pop()
+                carried_chunks = tail_chunks + carried_chunks
+                print(f"\n[Holding unfinished sentence, {cut_reason}] {sentences[-1]['text']}")
 
-            # If this doesn't look like the end of a sentence, hold it and
-            # wait for the next chunk instead of cutting the phrase off mid-thought
-            if not ends_sentence(spoken_text) and pending_holds < HOLD_LIMIT:
-                pending_text = spoken_text
-                pending_lang = detected_lang
-                pending_holds += 1
-                print(f"\n[Holding, no terminal punctuation] {spoken_text}")
-                continue
+        if not complete:
+            continue
 
-            pending_text = ""
-            pending_lang = None
-            pending_holds = 0
-
-        print(f"\n[Detected: {detected_lang.upper()}] {spoken_text}")
+        spoken_text = " ".join(sentence["text"] for sentence in complete)
+        print(f"\n[Detected: {detected_lang.upper()}, {cut_reason}] {spoken_text}")
 
         # Nudge the translation model to keep sermon-specific terms consistent
         glossary_line = f"Glossary of today's sermon terms (keep these spellings/names consistent): {sermon_glossary}. " if sermon_glossary else ""
 
         # Hand this phrase off to the translator thread and immediately go
         # back to listening for the next one instead of blocking on it here
-        translation_executor.submit(translate_and_broadcast, spoken_text, detected_lang, glossary_line)
+        translation_executor.submit(translate_and_broadcast, spoken_text, detected_lang, glossary_line, is_complete)
+
+
+# Llama sometimes opens with "Here is the direct English translation:" even when told not to
+TRANSLATION_PREAMBLE = re.compile(
+    r"""^\s*(?:
+        (?:here\s+is|here's|here’s)\b[^:\n]{0,60}\btranslation\b[^:\n]{0,30}:
+        | (?:the\s+)?(?:direct\s+)?(?:english\s+|ukrainian\s+)?translation\s*:
+        | ось\b[^:\n]{0,60}\bпереклад\w*[^:\n]{0,30}:
+        | переклад\s*:
+    )\s*""",
+    re.IGNORECASE | re.VERBOSE,
+)
+
+def strip_preamble(text):
+    text = TRANSLATION_PREAMBLE.sub("", text).strip()
+    # the preamble usually comes with the translation wrapped in quotes
+    if len(text) > 1 and text[0] in "\"“«" and text[-1] in "\"”»":
+        text = text[1:-1].strip()
+    return text
+
+
+# TTS needs ending punctuation to sound right. A sentence that got cut short
+# trails off with "…" instead of sounding like it finished.
+def finish_punctuation(text, is_complete):
+    if not is_complete:
+        return text.rstrip(" .,!?…") + "…"
+    return text if text.endswith((".", "!", "?", "…")) else text + "."
 
 
 # Translates one already-transcribed phrase, synthesizes TTS audio, and
 # broadcasts it. Runs on translation_executor so it never blocks the mic
 # capture loop in transcription_worker.
-def translate_and_broadcast(spoken_text, detected_lang, glossary_line):
+def translate_and_broadcast(spoken_text, detected_lang, glossary_line, is_complete=True):
     thread_id = threading.get_ident()
     temp_filename = f"output_{thread_id}.wav"
+
+    # The last few sentences, so the translator knows who "he" or "this" refers to
+    previous = " ".join(text for lang, text in recent_sentences if lang == detected_lang)
+    context_line = f'For context only, do not translate this part. The preacher just said: "{previous}"\n' if previous else ""
+    recent_sentences.append((detected_lang, spoken_text))
 
     try:
             # PATH A: Pastor speaks English -> Translate to Ukrainian
@@ -526,17 +596,19 @@ def translate_and_broadcast(spoken_text, detected_lang, glossary_line):
                 response = requests.post('http://localhost:11434/api/generate', json={
                     "model": "llama3:8b",
                     "system": "You are a raw translation machine. You must output ONLY the direct translation. Never include notes, explanations, introductions, or conversational filler.",
-                    "prompt": f"{glossary_line}Translate this English church sermon phrase to natural Ukrainian: {spoken_text}",
+                    "prompt": f"{glossary_line}{context_line}Translate this English church sermon phrase to natural Ukrainian: {spoken_text}",
                     "stream": False
                 })
                 translated_text = response.json()['response'].strip()
                 
                 # The Python Guillotine
                 translated_text = translated_text.split("Note:")[0].split("Notes:")[0].split("Примітка:")[0].strip()
+                translated_text = strip_preamble(translated_text)
+                if not translated_text:
+                    return
                 
                 # The Anti-Moan Punctuation Lock
-                if not translated_text.endswith((".", "!", "?")):
-                    translated_text += "."
+                translated_text = finish_punctuation(translated_text, is_complete)
                 
                 uk_voice = current_voice_id["uk"]
                 if uk_voice.startswith("gemini:"):
@@ -590,18 +662,18 @@ def translate_and_broadcast(spoken_text, detected_lang, glossary_line):
                 response = requests.post('http://localhost:11434/api/generate', json={
                     "model": "llama3:8b",
                     "system": "You are a raw translation machine. You must output ONLY the direct English translation. Never include notes, explanations, introductions, or quotes.",
-                    "prompt": f"{glossary_line}Translate this Ukrainian church sermon phrase to natural English: {spoken_text}",
+                    "prompt": f"{glossary_line}{context_line}Translate this Ukrainian church sermon phrase to natural English: {spoken_text}",
                     "stream": False
                 })
                 translated_text = response.json()['response'].strip()
                 
                 # The Python Guillotine
                 translated_text = translated_text.split("Note:")[0].split("Notes:")[0].strip()
+                translated_text = strip_preamble(translated_text)
                 translated_text = translated_text.replace('"', '').replace("'", "").replace("*", "").strip()
                 
                 # The Anti-Moan Punctuation Lock
-                if not translated_text.endswith((".", "!", "?")):
-                    translated_text += "."
+                translated_text = finish_punctuation(translated_text, is_complete)
                 
                 if len(translated_text.split()) < 3:
                     print(f"Skipping English TTS for short phrase: {translated_text}")

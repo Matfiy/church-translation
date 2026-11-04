@@ -415,6 +415,14 @@
             gap: 22px;
         }
 
+        /* Empty room below the last line, so the newest line can always
+           scroll up to its teleprompter position */
+        #transcript-feed::after {
+            content: "";
+            flex: none;
+            height: 70vh;
+        }
+
         /* Teleprompter line states: arrives (dim) -> speaking (highlighted)
            -> spoken (gray, smaller) -> leaving (fades out after a minute) */
         .line {
@@ -602,12 +610,6 @@
                 gap: 30px;
             }
 
-            /* Pushes lines to the bottom like before, but unlike
-               justify-content: flex-end it still lets the feed scroll */
-            #transcript-feed > .line:first-child {
-                margin-top: auto;
-            }
-
             .line {
                 padding: 14px 20px;
                 margin: 0 -20px;
@@ -785,7 +787,8 @@
         // Bumped on Leave / language switch so phrases still being decoded are dropped
         let playGeneration = 0;
         const activeSources = new Set();
-        const LINE_LIFETIME_MS = 60000; // spoken lines are removed after a minute
+        const KEEP_SPOKEN_LINES = 2; // finished lines left on screen for anyone who glanced away
+        const LINE_LIFETIME_MS = 20000; // and even those go after this long
 
         function renderLangList() {
             const list = document.getElementById('lang-list');
@@ -990,16 +993,28 @@
                     if (prev.classList.contains('speaking')) setLineState(prev, 'spoken');
                     prev = prev.previousElementSibling;
                 }
-                // Keep the line being read in the upper part of the feed, like a teleprompter
-                const feed = document.getElementById('transcript-feed');
-                feed.scrollTo({ top: lineEl.offsetTop - feed.clientHeight * 0.3, behavior: 'smooth' });
+                followCurrentLine();
+                // Lines change size as they highlight and gray out, so line it up again once they've settled
+                setTimeout(followCurrentLine, 400);
             } else if (state === 'spoken') {
                 setTimeout(() => removeLine(lineEl), LINE_LIFETIME_MS);
+                const spokenLines = document.querySelectorAll('#transcript-feed .line.spoken:not(.leaving)');
+                for (let i = 0; i < spokenLines.length - KEEP_SPOKEN_LINES; i++) removeLine(spokenLines[i]);
             }
         }
 
+        // Keeps the line being read in the upper part of the feed, like a teleprompter
+        function followCurrentLine() {
+            const feed = document.getElementById('transcript-feed');
+            const lineEl = feed.querySelector('.line.speaking');
+            if (!lineEl) return;
+            // A very long line starts higher up so all of it still fits
+            const spaceAbove = Math.max(12, Math.min(feed.clientHeight * 0.3, feed.clientHeight - lineEl.offsetHeight - 12));
+            feed.scrollTo({ top: lineEl.offsetTop - spaceAbove, behavior: 'smooth' });
+        }
+
         function removeLine(lineEl) {
-            if (!lineEl.isConnected) return;
+            if (!lineEl.isConnected || lineEl.classList.contains('leaving')) return;
             lineEl.classList.add('leaving');
             setTimeout(() => {
                 if (!lineEl.isConnected) return;
@@ -1010,6 +1025,7 @@
                 const removedHeight = lineEl.offsetHeight + parseFloat(getComputedStyle(feed).rowGap || 0);
                 lineEl.remove();
                 if (wasAbove) feed.scrollTop -= removedHeight;
+                followCurrentLine(); // setting scrollTop above cancels a scroll in progress
             }, 600);
         }
 

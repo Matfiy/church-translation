@@ -11,7 +11,7 @@ Dante mic ──► Whisper large-v3 (MLX) ──► Llama 3 8B (Ollama) ──�
               speech → text               translate uk ⇄ en       text → speech (MP3)    fuebc-translate.org   (WebSocket)
 ```
 
-- **Audio**: captured from the Dante Virtual Soundcard and split into phrases at the pastor's pauses (a 12-second phrase is cut off even without a pause).
+- **Audio**: captured from the Dante Virtual Soundcard and split into phrases at the pastor's pauses of about half a second or more. A phrase with no pause is cut at the quietest moment before 18 seconds. Only finished sentences are translated; the audio of an unfinished sentence is carried into the next phrase so Whisper hears it whole.
 - **Transcription**: runs locally on the Mac with [mlx-whisper](https://github.com/ml-explore/mlx-examples/tree/main/whisper). Common Whisper hallucinations (e.g. "Thank you.", "The Word of God.") are filtered out sentence by sentence.
 - **Translation**: runs locally with Llama 3 8B through [Ollama](https://ollama.com). A phrase is only translated when someone is listening in the target language.
 - **Voice**: Ukrainian is synthesized by Google Cloud — [Gemini 3.1 Flash TTS](https://docs.cloud.google.com/text-to-speech/docs/gemini-tts) (preview) or the standard [Cloud Text-to-Speech](https://cloud.google.com/text-to-speech) voices (WaveNet, Chirp 3 HD), switchable from the admin page. English is synthesized by the [Fish Audio](https://fish.audio) API. Both need internet and API keys. All audio is sent to listeners as MP3 (~32–64 kbps) to keep the church's upload bandwidth low.
@@ -80,7 +80,7 @@ Settings are constants near the top of `server.py`:
 | `GEMINI_TTS_MODEL` | `gemini-3.1-flash-tts-preview` | Gemini model used for `gemini:` voices |
 | `GEMINI_TTS_STYLE` | calm, warm sermon delivery | Style instruction Gemini reads every phrase with |
 
-The pause detection thresholds (`SILENCE_THRESHOLD`, `PAUSE_CHUNKS`, `MAX_CHUNKS`) and the hallucination list (`HALLUCINATIONS`) are at the top of `transcription_worker()`.
+The pause detection thresholds (`SILENCE_THRESHOLD`, `pause_chunks_needed()`, `MAX_CHUNKS`, `FLUSH_FRAGMENT_CHUNKS`) and the hallucination list (`HALLUCINATIONS`) are at the top of `transcription_worker()`.
 
 Secrets go in `.env`, which git ignores:
 
